@@ -11,6 +11,10 @@ dependencies = [
 
 [dependency-groups]
 dev = [
+    # Home Assistant's bluetooth integration depends on usb, whose runtime
+    # requirements are not installed by pytest-homeassistant-custom-component.
+    "aiousbwatcher==1.1.2",
+    "serialx==1.11.0",
     "pytest-homeassistant-custom-component==0.13.375",
     "pytest-asyncio==1.4.0",
     "ruff==0.17.6",

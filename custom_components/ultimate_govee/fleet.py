@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 from collections.abc import ItemsView, Iterable, Iterator, Mapping, ValuesView
 from types import MappingProxyType
 from typing import Any
@@ -13,6 +14,19 @@ from .profiles import profile_for
 from .protocol.state import decode_cloud_snapshot
 
 _LOGGER = logging.getLogger(__name__)
+
+# BLE addresses are MACs in Govee's cloud payloads. Accept the common separated
+# and compact forms, plus a UUID for stacks/adapters that report one.
+_BLE_ADDRESS_RE = re.compile(
+    r"^(?:[0-9A-Fa-f]{2}[:-]){5}[0-9A-Fa-f]{2}$"
+    r"|^[0-9A-Fa-f]{12}$"
+    r"|^[0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-"
+    r"[0-9A-Fa-f]{4}-[0-9A-Fa-f]{12}$"
+)
+_BLE_ADDRESS_FIELDS = ("bleAddress", "bleMac", "address")
+# ``bleName`` is usually the advertised local name. Only trust it when the
+# cloud value itself is an address.
+_BLE_NAME_FIELDS = ("bleName",)
 
 
 class Fleet:
@@ -135,6 +149,7 @@ def _build_device(device_id: str, raw: dict[str, Any]) -> GoveeDevice:
         hardware=settings.get("versionHard"),
         settings=settings,
         profile=profile,
+        ble_address=_ble_address(raw, ext, settings, last),
         raw_settings=raw,
     )
     device.state = decode_cloud_snapshot(profile, settings, last)
@@ -145,6 +160,7 @@ def _update_device_metadata(device: GoveeDevice, raw: dict[str, Any]) -> None:
     ext = raw.get("deviceExt")
     ext = ext if isinstance(ext, dict) else {}
     settings = _parse_json(ext.get("deviceSettings"))
+    last = _parse_json(ext.get("lastDeviceData"))
     if not settings:
         return
     if (
@@ -164,6 +180,38 @@ def _update_device_metadata(device: GoveeDevice, raw: dict[str, Any]) -> None:
     device.firmware = settings.get("versionSoft") or device.firmware
     device.hardware = settings.get("versionHard") or device.hardware
     device.name = str(raw.get("deviceName") or settings.get("deviceName") or device.name)
+    device.ble_address = _ble_address(raw, ext, settings, last) or device.ble_address
+
+
+def _ble_address(*sources: Any) -> str | None:
+    """Return a real BLE address from the known cloud payload fields.
+
+    Govee sometimes reports ``address`` in ``deviceSettings`` and sometimes as
+    ``bleAddress`` on the device or its extension. ``bleName`` is normally an
+    advertised name, so it is only accepted when it is itself address-shaped.
+    The integration never invents an address when none is present.
+    """
+    for source in sources:
+        if not isinstance(source, Mapping):
+            continue
+        for field in _BLE_ADDRESS_FIELDS:
+            address = _normalise_ble_address(source.get(field))
+            if address is not None:
+                return address
+        for field in _BLE_NAME_FIELDS:
+            address = _normalise_ble_address(source.get(field))
+            if address is not None:
+                return address
+    return None
+
+
+def _normalise_ble_address(value: Any) -> str | None:
+    if not isinstance(value, str):
+        return None
+    address = value.strip()
+    if not address or _BLE_ADDRESS_RE.fullmatch(address) is None:
+        return None
+    return address.upper()
 
 
 def _profile_inputs_changed(previous: dict[str, Any], current: dict[str, Any]) -> bool:

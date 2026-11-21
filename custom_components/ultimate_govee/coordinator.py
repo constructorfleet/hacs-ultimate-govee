@@ -101,9 +101,10 @@ class GoveeCoordinator(DataUpdateCoordinator[GoveeData]):
         self._lan: GoveeLan | None = None
         self._iot_started = False
         self._lan_started = False
+        self._ble = BleGattTransport(self.hass, on_report=self._handle_inbound)
         self.router = CommandRouter(
             (
-                BleGattTransport(),
+                self._ble,
                 BleBroadcastTransport(),
                 LanUdpTransport(lambda: self._lan, enabled=self.enable_lan),
                 LocalMqttTransport(),
@@ -120,6 +121,7 @@ class GoveeCoordinator(DataUpdateCoordinator[GoveeData]):
     async def async_setup(self) -> None:
         """Log in and start the enabled transports."""
         await self.auth.ensure_valid()
+        await self._ble.async_start()
         if self.enable_iot:
             await self._async_start_iot()
         if self.enable_lan:
@@ -127,6 +129,7 @@ class GoveeCoordinator(DataUpdateCoordinator[GoveeData]):
 
     async def async_shutdown(self) -> None:
         """Stop the transports and flush tokens."""
+        await self._ble.async_stop()
         if self._iot is not None:
             await self._iot.async_stop()
             self._iot = None

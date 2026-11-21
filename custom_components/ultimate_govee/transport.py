@@ -16,13 +16,18 @@ from dataclasses import dataclass
 from enum import StrEnum
 from typing import Any
 
+from .api.ble import GoveeBle
 from .api.cloud import GoveeApiError
 from .api.iot import GoveeIot
 from .api.lan import GoveeLan
 from .models import GoveeDevice
+from .profiles import DeviceProfile
+from .protocol.codec import build_frame, bytes_to_base64, frames_from_command
 from .protocol.commands import WireCommand
 
 _LOGGER = logging.getLogger(__name__)
+FRAME_LENGTH = 20
+BLE_STATUS_PREFIXES = frozenset({0xAA, 0xEE})
 
 
 class TransportKind(StrEnum):
@@ -137,16 +142,248 @@ class LocalMqttTransport(UnsupportedTransport):
     kind = TransportKind.LOCAL_MQTT
 
 
-class BleGattTransport(UnsupportedTransport):
-    """BLE GATT path for direct local control."""
+class BleGattTransport(Transport):
+    """BLE GATT path for direct local control.
+
+    A connection is opened lazily per device. ``supported`` only becomes true
+    when Home Assistant's Bluetooth component is loaded (or the transport was
+    explicitly constructed as available); devices without a cloud-provided BLE
+    address are never claimed.
+    """
 
     kind = TransportKind.BLE_GATT
 
+    def __init__(
+        self,
+        hass: Any | None = None,
+        *,
+        available: bool | None = None,
+        manager_factory: Callable[[Any, str, str, Callable[[bytes], None]], Any] | None = None,
+        on_report: Callable[[StatusReport], None] | None = None,
+    ) -> None:
+        self.hass = hass
+        self.enabled = _bluetooth_available(hass) if available is None else available
+        self._manager_factory = manager_factory or _default_ble_manager
+        self._on_report = on_report
+        self._managers: dict[str, Any] = {}
+        self._started = False
+
+    @property
+    def supported(self) -> bool:
+        return self.enabled
+
+    @property
+    def connected(self) -> bool:
+        return any(
+            bool(getattr(manager, "connected", False)) for manager in self._managers.values()
+        )
+
+    def supports(self, device: GoveeDevice) -> bool:
+        return self.enabled and bool(device.ble_address)
+
+    async def async_start(self) -> None:
+        """Prepare the transport.
+
+        Connections are opened on demand, so starting only records that BLE is
+        available. This keeps the coordinator's start/stop contract explicit.
+        """
+        self._started = self.enabled
+        if self.enabled:
+            _LOGGER.debug("BLE GATT transport is available")
+        else:
+            _LOGGER.debug("BLE GATT transport is unavailable; using other transports")
+
+    async def async_stop(self) -> None:
+        """Close every per-device BLE connection."""
+        self._started = False
+        managers = list(self._managers.values())
+        self._managers.clear()
+        for manager in managers:
+            stop = getattr(manager, "async_stop", None)
+            if stop is None:
+                continue
+            try:
+                await stop()
+            except Exception as err:
+                _LOGGER.debug("BLE shutdown failed: %s", err)
+
+    async def send(self, device: GoveeDevice, command: WireCommand) -> None:
+        if not self.supports(device):
+            raise TransportUnavailable(f"{device.name} has no BLE GATT path")
+        frames = _ble_frames(command, device.profile)
+        manager = await self._async_manager(device)
+        try:
+            await manager.async_send_frames(frames)
+        except Exception as err:
+            _LOGGER.debug(
+                "BLE command failed for %s (%s): %s",
+                device.name,
+                device.ble_address,
+                err,
+            )
+            raise TransportNotSent(str(err)) from err
+
+    async def request_status(self, device: GoveeDevice) -> None:
+        if not self.supports(device):
+            raise TransportUnavailable(f"{device.name} has no BLE GATT path")
+        manager = await self._async_manager(device)
+        try:
+            await manager.async_request_status()
+        except Exception as err:
+            _LOGGER.debug(
+                "BLE status request failed for %s (%s): %s",
+                device.name,
+                device.ble_address,
+                err,
+            )
+            raise TransportNotSent(str(err)) from err
+
+    async def _async_manager(self, device: GoveeDevice) -> Any:
+        address = device.ble_address
+        if not address:
+            raise TransportUnavailable(f"{device.name} has no BLE address")
+        manager = self._managers.get(device.device_id)
+        if manager is not None and getattr(manager, "address", address) == address:
+            return manager
+        if manager is not None:
+            stop = getattr(manager, "async_stop", None)
+            if stop is not None:
+                try:
+                    await stop()
+                except Exception as err:
+                    _LOGGER.debug("BLE reconnect cleanup failed for %s: %s", device.name, err)
+        manager = self._manager_factory(
+            self.hass,
+            address,
+            device.name,
+            self._notification_callback(device.device_id),
+        )
+        self._managers[device.device_id] = manager
+        return manager
+
+    def _notification_callback(self, device_id: str) -> Callable[[bytes], None]:
+        def _handle(frame: bytes) -> None:
+            self._handle_notification(device_id, frame)
+
+        return _handle
+
+    def _handle_notification(self, device_id: str, frame: bytes) -> None:
+        """Turn one GATT notification into a status report for the coordinator."""
+        data = bytes(frame)
+        if not data:
+            return
+        if data[0] not in BLE_STATUS_PREFIXES:
+            # Write acknowledgements share the characteristic (``33 <cmd> 00``)
+            # and are not device state. Forwarding them would overwrite state.
+            _LOGGER.debug(
+                "Ignoring non-status BLE frame from %s: %s",
+                device_id,
+                data.hex(" "),
+            )
+            return
+        if self._on_report is not None:
+            self._on_report(StatusReport(device_id, {"op": {"command": [bytes_to_base64(data)]}}))
+
+    def status(self) -> dict[str, Any]:
+        return {
+            "kind": self.kind.value,
+            "supported": self.supported,
+            "enabled": self.enabled,
+            "started": self._started,
+            "connected": self.connected,
+        }
+
 
 class BleBroadcastTransport(UnsupportedTransport):
-    """Receive-only BLE advertisement observer for sensors."""
+    """Receive-only BLE advertisement observer for sensors.
+
+    The Govee advertisement only carries identity (goods type, pact type and
+    protocol revision); sensor readings arrive through GATT notifications or
+    cloud push. There is no generic, safe reading to expose from an advert, so
+    this path stays explicitly unsupported rather than inventing sensor data.
+    """
 
     kind = TransportKind.BLE_BROADCAST
+
+
+def _bluetooth_available(hass: Any | None) -> bool:
+    """Return whether Home Assistant's Bluetooth component is loaded."""
+    if hass is None:
+        return False
+    components = getattr(getattr(hass, "config", None), "components", ())
+    return "bluetooth" in components
+
+
+def _default_ble_manager(
+    hass: Any,
+    address: str,
+    name: str,
+    on_notification: Callable[[bytes], None],
+) -> GoveeBle:
+    return GoveeBle(hass, address, name, on_notification)
+
+
+def _ble_frames(command: WireCommand, profile: DeviceProfile) -> list[bytes]:
+    """Encode a wire command as documented BLE frames or refuse it."""
+    if command.cmd in {"ptReal", "multiSync"}:
+        frames = frames_from_command((command.data or {}).get("command"))
+        if not frames:
+            raise TransportUnavailable("The command has no BLE frames")
+        for frame in frames:
+            if len(frame) != FRAME_LENGTH or _checksum(frame[: FRAME_LENGTH - 1]) != frame[-1]:
+                raise TransportUnavailable(
+                    f"The {command.cmd} payload is not a valid 20-byte BLE frame"
+                )
+        return frames
+
+    if command.cmd == "turn":
+        value = _byte_value((command.data or {}).get("val"))
+        if value is not None:
+            # Wire power values are profile-specific (some switches use 17/16);
+            # the BLE frame uses a plain 1/0.
+            return [build_frame(0x01, [1 if value == profile.power_on else 0])]
+        raise TransportUnavailable("The turn command has no BLE value")
+
+    if command.cmd == "brightness":
+        value = _byte_value((command.data or {}).get("val"))
+        if value is not None:
+            percent = round(value * 100 / max(1, profile.brightness_max))
+            percent = max(0, min(100, percent))
+            if profile.brightness_max == 254:
+                # Legacy 254-scale models map 0..100 onto 20..254 over BLE.
+                ble_value = 20 + round(percent * 234 / 100)
+            else:
+                ble_value = percent
+            return [build_frame(0x04, [ble_value])]
+        raise TransportUnavailable("The brightness command has no BLE value")
+
+    if command.cmd == "colorwc":
+        # The RGB/colour-temperature layout differs by family (0x05/0x02,
+        # 0x05/0x0D, 0x05/0x15 and per-SKU variants), and nothing in the
+        # device profile selects one. Fall back instead of sending wrong bytes.
+        raise TransportUnavailable(
+            "BLE colour frames are family-specific; use LAN or cloud for colorwc"
+        )
+
+    raise TransportUnavailable(f"{command.cmd} has no BLE GATT encoding")
+
+
+def _byte_value(value: Any) -> int | None:
+    """Coerce an int-like payload byte, rejecting values outside one byte."""
+    if isinstance(value, bool):
+        return int(value)
+    try:
+        number = int(value)
+    except TypeError, ValueError:
+        return None
+    return number if 0 <= number <= 0xFF else None
+
+
+def _checksum(data: bytes) -> int:
+    checksum = 0
+    for value in data:
+        checksum ^= value
+    return checksum
 
 
 class CloudMqttTransport(Transport):

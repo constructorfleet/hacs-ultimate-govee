@@ -119,6 +119,7 @@ class GoveeDevice:
     state: DeviceState = field(default_factory=DeviceState)
     lan_ip: str | None = None
     lan_last_seen: float = 0.0
+    ble_address: str | None = None
     raw_settings: dict[str, Any] = field(default_factory=dict)
     profile_inputs_warned: bool = False
 

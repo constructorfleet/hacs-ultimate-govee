@@ -5,6 +5,9 @@
     "@Teagan42"
   ],
   "config_flow": true,
+  "dependencies": [
+    "bluetooth"
+  ],
   "documentation": "https://github.com/constructorfleet/hacs-ultimate-govee",
   "integration_type": "hub",
   "iot_class": "cloud_polling",
