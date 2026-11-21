@@ -307,9 +307,7 @@ class GoveeCoordinator(DataUpdateCoordinator[GoveeData]):
             sent += 1
         if not sent:
             if matched:
-                raise GoveeApiError(
-                    f"No transport delivered the {tap_to_run.name} tap-to-run"
-                )
+                raise GoveeApiError(f"No transport delivered the {tap_to_run.name} tap-to-run")
             raise GoveeApiError(f"No devices matched the {tap_to_run.name} tap-to-run")
 
     def _resolve_tap_device(self, action: TapAction) -> GoveeDevice | None:

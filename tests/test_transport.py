@@ -86,7 +86,6 @@ def test_cloud_transport_sends_envelope_fields() -> None:
     transport = CloudMqttTransport(lambda: iot, enabled=True)
     command = WireCommand("ptReal", {"command": ["frame"]}, cmd_version=2, msg_type=0)
 
-
     asyncio.run(transport.send(device(), command))
 
     assert iot.sent == [("topic/device-1", "ptReal", {"command": ["frame"]}, 2, 0)]
@@ -100,7 +99,6 @@ def test_lan_transport_failure_clears_endpoint() -> None:
     command = WireCommand("turn", {"val": 1}, lan_cmd="turn", lan_data={"value": 1})
 
     with pytest.raises(TransportNotSent):
-
         asyncio.run(transport.send(target, command))
 
     assert target.lan_ip is None
@@ -120,7 +118,6 @@ def test_router_prefers_lan_and_falls_back_to_cloud() -> None:
     target = device(lan_ip="192.168.1.20")
     command = WireCommand("turn", {"val": 1}, lan_cmd="turn", lan_data={"value": 1})
 
-
     used = asyncio.run(router.send(target, command))
 
     assert used is TransportKind.CLOUD_MQTT
@@ -138,7 +135,6 @@ def test_router_skips_lan_without_a_lan_payload() -> None:
     )
     target = device(lan_ip="192.168.1.20")
     command = WireCommand("ptReal", {"command": ["frame"]})
-
 
     used = asyncio.run(router.send(target, command))
 
@@ -183,7 +179,6 @@ def test_router_request_status_prefers_lan() -> None:
     )
     target = device(lan_ip="192.168.1.20")
 
-
     used = asyncio.run(router.request_status(target))
 
     assert used is TransportKind.LAN_UDP
@@ -203,7 +198,6 @@ def test_router_request_status_falls_back_to_cloud() -> None:
     )
     target = device(lan_ip="192.168.1.20")
 
-
     used = asyncio.run(router.request_status(target))
 
     assert used is TransportKind.CLOUD_MQTT
@@ -215,7 +209,6 @@ def test_cloud_status_skips_offline_device() -> None:
     router = CommandRouter((CloudMqttTransport(lambda: iot, enabled=True),))
     target = device(state=DeviceState(online=False))
 
-
     with pytest.raises(GoveeApiError, match="No transport"):
         asyncio.run(router.request_status(target))
 
@@ -226,9 +219,7 @@ def test_lan_event_normalizes_reports_and_observations() -> None:
     transport = LanUdpTransport(FakeLan, enabled=True)
 
     report = transport.event("device-1", "devStatus", {"onOff": 1}, "192.168.1.20")
-    observation = transport.event(
-        "device-1", "scan", {}, "192.168.1.21", seen_at=12.5
-    )
+    observation = transport.event("device-1", "scan", {}, "192.168.1.21", seen_at=12.5)
 
     assert isinstance(report, StatusReport)
     assert report.device_id == "device-1"

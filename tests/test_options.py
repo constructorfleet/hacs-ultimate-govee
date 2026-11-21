@@ -55,9 +55,7 @@ def test_from_mapping_preserves_legacy_coercions() -> None:
 
 
 def test_ignored_devices_keep_only_strings() -> None:
-    options = GoveeOptions.from_mapping(
-        {CONF_IGNORED_DEVICES: ["device-1", 42, None, "device-2"]}
-    )
+    options = GoveeOptions.from_mapping({CONF_IGNORED_DEVICES: ["device-1", 42, None, "device-2"]})
 
     assert options.ignored_devices == frozenset({"device-1", "device-2"})
 

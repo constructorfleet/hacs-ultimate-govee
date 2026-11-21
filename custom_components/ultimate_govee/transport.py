@@ -285,15 +285,11 @@ class LanUdpTransport(Transport):
         try:
             await client.async_request_status(ip)
         except OSError as err:
-            _LOGGER.debug(
-                "LAN status request failed for %s (%s): %s", device.name, ip, err
-            )
+            _LOGGER.debug("LAN status request failed for %s (%s): %s", device.name, ip, err)
             device.lan_failed()
             raise TransportNotSent(str(err)) from err
         except RuntimeError as err:
-            _LOGGER.debug(
-                "LAN status request failed for %s (%s): %s", device.name, ip, err
-            )
+            _LOGGER.debug("LAN status request failed for %s (%s): %s", device.name, ip, err)
             raise TransportNotSent(str(err)) from err
 
     def event(
@@ -308,9 +304,7 @@ class LanUdpTransport(Transport):
         """Normalize a LAN datagram into a typed status report or observation."""
         if command == "devStatus":
             return StatusReport(device_id, data)
-        return LanObservation(
-            device_id, ip, seen_at if seen_at is not None else time.monotonic()
-        )
+        return LanObservation(device_id, ip, seen_at if seen_at is not None else time.monotonic())
 
     def status(self) -> dict[str, Any]:
         client = self._lan()
@@ -377,7 +371,4 @@ class CommandRouter:
 
     def status(self) -> dict[str, Any]:
         """Return every adapter's state, including unsupported ones."""
-        return {
-            transport.kind.value: transport.status()
-            for transport in self._transports.values()
-        }
+        return {transport.kind.value: transport.status() for transport in self._transports.values()}

@@ -43,21 +43,15 @@ class GoveeOptions:
         ignored = mapping.get(CONF_IGNORED_DEVICES) or []
         return cls(
             poll_interval=int(mapping.get(CONF_POLL_INTERVAL, DEFAULT_POLL_INTERVAL)),
-            lan_scan_interval=int(
-                mapping.get(CONF_LAN_SCAN_INTERVAL, DEFAULT_LAN_SCAN_INTERVAL)
-            ),
+            lan_scan_interval=int(mapping.get(CONF_LAN_SCAN_INTERVAL, DEFAULT_LAN_SCAN_INTERVAL)),
             enable_lan=bool(mapping.get(CONF_ENABLE_LAN, DEFAULT_ENABLE_LAN)),
             enable_iot=bool(mapping.get(CONF_ENABLE_IOT, DEFAULT_ENABLE_IOT)),
-            enable_effects=bool(
-                mapping.get(CONF_ENABLE_EFFECTS, DEFAULT_ENABLE_EFFECTS)
-            ),
+            enable_effects=bool(mapping.get(CONF_ENABLE_EFFECTS, DEFAULT_ENABLE_EFFECTS)),
             enable_tap_to_runs=bool(
                 mapping.get(CONF_ENABLE_TAP_TO_RUNS, DEFAULT_ENABLE_TAP_TO_RUNS)
             ),
             ignored_devices=frozenset(
-                str(device_id)
-                for device_id in ignored
-                if isinstance(device_id, str)
+                str(device_id) for device_id in ignored if isinstance(device_id, str)
             ),
         )
 

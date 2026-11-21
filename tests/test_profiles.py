@@ -142,9 +142,7 @@ def test_exact_model_rules_precede_prefix_rules() -> None:
         ("H7014", "switch_single", KIND_SWITCH),
     ],
 )
-def test_known_prefix_collisions_resolve_to_exact_models(
-    sku: str, family: str, kind: str
-) -> None:
+def test_known_prefix_collisions_resolve_to_exact_models(sku: str, family: str, kind: str) -> None:
     profile = profile_for(sku)
 
     assert profile.family == family
