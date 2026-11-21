@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.2.0](https://github.com/constructorfleet/hacs-ultimate-govee/compare/v0.1.1...v0.2.0) (2026-11-21)
+
+
+### Features
+
+* add device filtering, effects toggle and tap-to-run buttons ([73dc472](https://github.com/constructorfleet/hacs-ultimate-govee/commit/73dc47297ec67afd002e07a37a15fc52f89d12a0))
+
 ## [0.1.1](https://github.com/constructorfleet/hacs-ultimate-govee/compare/ultimate-govee-v0.1.0...ultimate-govee-v0.1.1) (2026-11-21)
 
 
