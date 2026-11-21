@@ -3,7 +3,6 @@
   "packages": {
     ".": {
       "release-type": "simple",
-      "package-name": "ultimate-govee",
       "version-file": "version.txt",
       "extra-files": [
         {
