@@ -6,6 +6,7 @@ import json
 import logging
 import re
 from collections.abc import Callable, ItemsView, Iterable, Iterator, Mapping, ValuesView
+from contextlib import contextmanager
 from types import MappingProxyType
 from typing import Any
 
@@ -42,8 +43,8 @@ class Fleet:
         self._devices: dict[str, GoveeDevice] = {device.device_id: device for device in devices}
         self._view: Mapping[str, GoveeDevice] = MappingProxyType(self._devices)
         self._listeners: list[Callable[[], None]] = []
-        self._batch_depth = 0
-        self._pending_notification = False
+        self._change_depth = 0
+        self._changed = False
 
     def add_listener(self, listener: Callable[[], None]) -> None:
         """Register a callback for any device change."""
@@ -55,17 +56,29 @@ class Fleet:
         if listener in self._listeners:
             self._listeners.remove(listener)
 
-    def _notify(self) -> None:
-        if self._batch_depth:
-            self._pending_notification = True
-            return
-        for listener in tuple(self._listeners):
-            listener()
+    @contextmanager
+    def _change(self) -> Iterator[None]:
+        """Publish once when the outermost change block commits.
 
-    def _flush(self) -> None:
-        if self._batch_depth == 0 and self._pending_notification:
-            self._pending_notification = False
-            self._notify()
+        Every mutator runs inside this block. ``refresh`` nests the blocks of
+        its internal steps, so the listeners see one commit for the whole
+        refresh instead of one per step.
+        """
+        self._change_depth += 1
+        try:
+            yield
+        finally:
+            self._change_depth -= 1
+            if self._change_depth == 0 and self._changed:
+                self._changed = False
+                for listener in tuple(self._listeners):
+                    listener()
+
+    def _record(self) -> None:
+        """Mark the current change block as having modified the fleet."""
+        if self._change_depth == 0:
+            raise RuntimeError("Fleet change recorded outside a change block")
+        self._changed = True
 
     @property
     def by_id(self) -> Mapping[str, GoveeDevice]:
@@ -101,13 +114,14 @@ class Fleet:
         ignored_ids = {str(device_id) for device_id in ignored}
         removed = {device_id for device_id in self._devices if device_id in ignored_ids}
         if removed:
-            self._devices = {
-                device_id: device
-                for device_id, device in self._devices.items()
-                if device_id not in removed
-            }
-            self._view = MappingProxyType(self._devices)
-            self._notify()
+            with self._change():
+                self._devices = {
+                    device_id: device
+                    for device_id, device in self._devices.items()
+                    if device_id not in removed
+                }
+                self._view = MappingProxyType(self._devices)
+                self._record()
         return removed
 
     def reconcile(
@@ -127,30 +141,31 @@ class Fleet:
         seen: set[str] = set()
         changed = False
 
-        for raw in raw_devices:
-            if not isinstance(raw, Mapping):
-                continue
-            device_id = str(raw.get("device") or "")
-            if not device_id or device_id in ignored_ids:
-                continue
-            seen.add(device_id)
-            device = self._devices.get(device_id)
-            if device is None:
-                device = _build_device(device_id, dict(raw))
-                changed = True
-            else:
-                changed = _update_device_metadata(device, dict(raw)) or changed
-            next_devices[device_id] = device
+        with self._change():
+            for raw in raw_devices:
+                if not isinstance(raw, Mapping):
+                    continue
+                device_id = str(raw.get("device") or "")
+                if not device_id or device_id in ignored_ids:
+                    continue
+                seen.add(device_id)
+                device = self._devices.get(device_id)
+                if device is None:
+                    device = _build_device(device_id, dict(raw))
+                    changed = True
+                else:
+                    changed = _update_device_metadata(device, dict(raw)) or changed
+                next_devices[device_id] = device
 
-        for device_id, device in self._devices.items():
-            if device_id in ignored_ids:
-                continue
-            next_devices.setdefault(device_id, device)
+            for device_id, device in self._devices.items():
+                if device_id in ignored_ids:
+                    continue
+                next_devices.setdefault(device_id, device)
 
-        self._devices = next_devices
-        self._view = MappingProxyType(next_devices)
-        if changed:
-            self._notify()
+            self._devices = next_devices
+            self._view = MappingProxyType(next_devices)
+            if changed:
+                self._record()
         return seen
 
     def refresh(
@@ -159,45 +174,43 @@ class Fleet:
         *,
         ignored: Iterable[str] = (),
     ) -> set[str]:
-        """Prune, reconcile and reconcile reachability as one notification.
+        """Prune, reconcile and reconcile reachability as one commit.
 
         The coordinator uses this so one cloud refresh produces one listener
         notification instead of one per internal step.
         """
-        self._batch_depth += 1
-        try:
+        with self._change():
             removed = self.prune(ignored)
             if removed:
                 _LOGGER.debug("Removed ignored devices from the fleet: %s", sorted(removed))
             seen = self.reconcile(raw_devices, ignored=ignored)
             self.reconcile_seen(seen)
-        finally:
-            self._batch_depth -= 1
-            self._flush()
         return seen
 
     def reconcile_seen(self, seen: set[str]) -> None:
         """Mark devices absent from the cloud listing offline unless on LAN."""
-        changed = False
-        for device_id, device in self._devices.items():
-            if (
-                device_id not in seen
-                and not device.lan_reachable
-                and device.state.online is not False
-            ):
-                device.state.online = False
-                changed = True
-        if changed:
-            self._notify()
+        with self._change():
+            changed = False
+            for device_id, device in self._devices.items():
+                if (
+                    device_id not in seen
+                    and not device.lan_reachable
+                    and device.state.online is not False
+                ):
+                    device.state.online = False
+                    changed = True
+            if changed:
+                self._record()
 
     def observe_lan(self, device_id: str, ip: str, seen_at: float) -> bool:
         """Record that ``device_id`` answered on the LAN."""
         device = self._devices.get(device_id)
         if device is None:
             return False
-        changed = _observe_lan(device, ip, seen_at)
-        if changed:
-            self._notify()
+        with self._change():
+            changed = _observe_lan(device, ip, seen_at)
+            if changed:
+                self._record()
         return changed
 
     def mark_lan_failed(self, device_id: str) -> bool:
@@ -207,9 +220,10 @@ class Fleet:
             return False
         if device.lan_ip is None and device.lan_last_seen == 0.0:
             return False
-        device.lan_ip = None
-        device.lan_last_seen = 0.0
-        self._notify()
+        with self._change():
+            device.lan_ip = None
+            device.lan_last_seen = 0.0
+            self._record()
         return True
 
     def apply_state(self, device_id: str, state: DeviceState | Mapping[str, Any]) -> bool:
@@ -219,9 +233,10 @@ class Fleet:
             return False
         if not isinstance(state, DeviceState):
             state = DeviceState.from_mapping(state)
-        changed = device.state.merge_from(state)
-        if changed:
-            self._notify()
+        with self._change():
+            changed = device.state.merge_from(state)
+            if changed:
+                self._record()
         return changed
 
     def apply_report(
@@ -236,12 +251,13 @@ class Fleet:
         device = self._devices.get(device_id)
         if device is None:
             return False
-        changed = False
-        if ip is not None:
-            changed = _observe_lan(device, ip, seen_at or 0.0)
-        changed = device.state.merge_from(state) or changed
-        if changed:
-            self._notify()
+        with self._change():
+            changed = False
+            if ip is not None:
+                changed = _observe_lan(device, ip, seen_at or 0.0)
+            changed = device.state.merge_from(state) or changed
+            if changed:
+                self._record()
         return changed
 
 

@@ -15,13 +15,19 @@ from custom_components.ultimate_govee.profiles import (
     KIND_CEILING_FAN,
     KIND_SWITCH,
     KIND_TV,
-    SKU_DIALECTS,
+    SKU_ROWS,
     profile_for,
 )
 from custom_components.ultimate_govee.protocol import commands
-from custom_components.ultimate_govee.protocol.codec import bytes_to_base64
+from custom_components.ultimate_govee.protocol.codec import build_frame_b64, bytes_to_base64
 from custom_components.ultimate_govee.protocol.command import ACTION_FRAMES, STRATEGY_MULTI_SYNC
-from custom_components.ultimate_govee.protocol.families import DIALECTS, dialect_for
+from custom_components.ultimate_govee.protocol.families import (
+    DIALECTS,
+    decode_raw,
+    decode_register,
+    dialect_for,
+)
+from custom_components.ultimate_govee.protocol.families.base import FamilyDialect
 from custom_components.ultimate_govee.protocol.state import decode_message
 
 
@@ -76,7 +82,7 @@ def test_dialects_are_assigned_per_sku(sku: str, dialect: str, kind: str) -> Non
 
 
 def test_dialect_names_all_have_an_implementation() -> None:
-    assert set(SKU_DIALECTS.values()) <= set(DIALECTS)
+    assert {row.dialect for row in SKU_ROWS.values()} <= set(DIALECTS)
     for sku in ("H1310", "H7130", "H7131", "H7141", "H7142", "H7123", "H7172"):
         assert profile_for(sku).dialect in DIALECTS
 
@@ -92,7 +98,7 @@ def test_h7141_and_h7142_are_separate_dialects() -> None:
     second = profile_for("H7142")
 
     assert first.dialect != second.dialect
-    assert first.family == second.family == "humidifier"
+    assert first.evidence == second.evidence == "humidifier"
     assert "uv" not in first.features
     assert "uv" in second.features
 
@@ -269,3 +275,77 @@ def test_fan_night_light_is_a_golden_frame_sequence() -> None:
         bytes([0x3A, 0x1B, 0x01, 0x02, 0x32]),
         bytes([0x3A, 0x05, 0x0D, 0x01, 0x02]),
     ]
+
+
+class _StubDialect(FamilyDialect):
+    """A dialect double that claims one register and records nothing else."""
+
+    name = "stub"
+    source = "test double"
+    confidence = "high"
+
+    def __init__(self, claimed_register: int | None, decoded: dict[str, object]) -> None:
+        self.claimed_register = claimed_register
+        self.decoded = decoded
+
+    def decode_frame(
+        self,
+        profile: object,
+        register: int,
+        payload: bytes,
+        result: dict[str, object],
+    ) -> bool:
+        if register != self.claimed_register:
+            return False
+        result.update(self.decoded)
+        return True
+
+
+def test_each_dialect_owns_both_directions() -> None:
+    for dialect in DIALECTS.values():
+        assert callable(dialect.encode)
+        assert callable(dialect.decode_frame)
+        assert callable(dialect.decode_raw)
+
+
+def test_decode_register_asks_the_profile_dialect_first(monkeypatch: pytest.MonkeyPatch) -> None:
+    profile = profile_for("H7130")
+    monkeypatch.setitem(DIALECTS, "heater1", _StubDialect(0x04, {"brightness": 77}))
+    result: dict[str, object] = {}
+
+    decode_register(profile, 0x04, bytes([0x32]), result)
+
+    assert result == {"brightness": 77}
+
+
+def test_decode_register_falls_back_to_generic_when_the_dialect_declines(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    profile = profile_for("H7130")
+    monkeypatch.setitem(DIALECTS, "heater1", _StubDialect(None, {}))
+    result: dict[str, object] = {}
+
+    decode_register(profile, 0x04, bytes([0x32]), result)
+
+    assert result == {"brightness": 50}
+
+
+def test_decode_message_routes_frames_through_the_sku_dialect(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    profile = profile_for("H7131")
+    monkeypatch.setitem(DIALECTS, "heater2", _StubDialect(0x04, {"brightness": 77}))
+
+    state = decode_message(profile, {"op": {"command": [build_frame_b64(0x04, [0x32])]}})
+
+    assert state.brightness == 77
+
+
+def test_generic_dialect_owns_unclaimed_whole_frames() -> None:
+    fixture = bytes.fromhex("092e0000000000000015b800000000000000000c")
+    result: dict[str, object] = {}
+
+    assert decode_raw(profile_for("H5106"), fixture, result)
+    assert result["pm25"] == 12
+    # A dialect without a whole-frame layout declines instead of inventing one.
+    assert not decode_raw(profile_for("H7131"), fixture, {})

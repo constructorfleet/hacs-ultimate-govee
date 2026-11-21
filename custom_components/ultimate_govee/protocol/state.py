@@ -3,35 +3,20 @@
 from __future__ import annotations
 
 import json
-import logging
 from typing import Any
 
 from ..models import DeviceState
 from ..profiles import (
     KIND_CO2,
-    KIND_DEHUMIDIFIER,
-    KIND_DIFFUSER,
-    KIND_HEATER,
-    KIND_HUMIDIFIER,
-    KIND_KETTLE,
-    KIND_LEAK,
-    KIND_LIGHT,
     KIND_MONITOR,
-    KIND_PRESENCE,
     KIND_PROBE,
-    KIND_PURIFIER,
     KIND_SWITCH,
     KIND_THERMO,
-    KIND_TV,
     DeviceProfile,
 )
 from .codec import ProtocolError, decode_frame, frames_from_command
-from .families import dialect_for
-from .families.common import apply_humidity_reading
-
-_LOGGER = logging.getLogger(__name__)
-
-LIGHT_KINDS = {KIND_LIGHT, KIND_TV, KIND_DIFFUSER}
+from .families import decode_raw, decode_register
+from .families.common import scale_brightness
 
 
 def decode_message(profile: DeviceProfile, payload: Any) -> DeviceState:
@@ -84,7 +69,7 @@ def decode_cloud_snapshot(
 
     brightness = _as_int(last.get("brightness"))
     if brightness is not None:
-        data["brightness"] = _scale_brightness(profile, brightness)
+        data["brightness"] = scale_brightness(profile, brightness)
 
     temperature = _temperature(profile, last.get("tem"))
     if temperature is not None:
@@ -169,7 +154,7 @@ def _decode_state_object(profile: DeviceProfile, value: Any, result: dict[str, A
     if "brightness" in value:
         brightness = _as_int(value["brightness"])
         if brightness is not None:
-            result["brightness"] = _scale_brightness(profile, brightness)
+            result["brightness"] = scale_brightness(profile, brightness)
     if "colorTemInKelvin" in value:
         kelvin = _as_int(value["colorTemInKelvin"])
         if kelvin:
@@ -214,7 +199,7 @@ def _decode_known_fields(
     if "brightness" in message:
         brightness = _as_int(message["brightness"])
         if brightness is not None:
-            result["brightness"] = _scale_brightness(profile, brightness)
+            result["brightness"] = scale_brightness(profile, brightness)
     if "colorTemInKelvin" in message and result.get("color_temp") is None:
         kelvin = _as_int(message["colorTemInKelvin"])
         if kelvin:
@@ -224,10 +209,10 @@ def _decode_known_fields(
 
 
 def _decode_frames(profile: DeviceProfile, op: Any, result: dict[str, Any]) -> None:
+    """Unwrap report frames and hand each one to the SKU's dialect."""
     if not isinstance(op, dict):
         return
 
-    kind = profile.kind
     # Newer firmware nests the frames under `op.command`; some models use
     # `op.mode`/`op.value` or `op.opCode` + `op.modeValue` instead.
     raw_frames = frames_from_command(op.get("command"))
@@ -241,11 +226,7 @@ def _decode_frames(profile: DeviceProfile, op: Any, result: dict[str, Any]) -> N
         raw_frames.append(bytes([0xAA, 0x05, *mode_value]))
 
     for raw in raw_frames:
-        if kind == KIND_MONITOR and len(raw) >= 20:
-            _decode_monitor_frame(raw, result)
-            continue
-        if raw[0] == 0xEE and kind == KIND_LEAK:
-            _decode_leak_frame(raw, result)
+        if decode_raw(profile, raw, result):
             continue
         if raw[0] not in (0xAA, 0x33, 0x3A):
             continue
@@ -253,182 +234,7 @@ def _decode_frames(profile: DeviceProfile, op: Any, result: dict[str, Any]) -> N
             register, payload = decode_frame(raw)
         except ProtocolError:
             continue
-        if raw[0] == 0xAA and register == 0x0A and kind == KIND_CO2:
-            _decode_co2_frame(payload, result)
-            continue
-        _decode_frame(profile, register, payload, result)
-
-
-def _decode_monitor_frame(frame: bytes, result: dict[str, Any]) -> None:
-    """Decode the H5106's heuristic 20-byte air-quality frame."""
-    temperature = ((frame[0] << 8) | frame[1]) / 100
-    if not -30 <= temperature <= 80:
-        return
-    result["temperature"] = round(temperature, 1)
-    if len(frame) >= 11:
-        result["humidity"] = ((frame[9] << 8) | frame[10]) / 100
-    if len(frame) >= 20:
-        result["pm25"] = (frame[18] << 8) | frame[19]
-
-
-def _decode_co2_frame(payload: bytes, result: dict[str, Any]) -> None:
-    """Decode the H5140 ``AA 0A`` little-endian temperature/humidity/CO2 frame."""
-    if len(payload) < 6:
-        return
-    # The frame is AA 0A <temp lo> <temp hi> <rh lo> <rh hi> <co2 lo> <co2 hi>.
-    temperature = (payload[0] | (payload[1] << 8)) / 100
-    if -40 < temperature < 100:
-        result["temperature"] = round(temperature, 2)
-    humidity = payload[2] | (payload[3] << 8)
-    result["humidity"] = max(0, min(100, round(humidity / 100)))
-    co2 = payload[4] | (payload[5] << 8)
-    if 0 <= co2 <= 40000:
-        result["co2"] = co2
-
-
-def _decode_leak_frame(frame: bytes, result: dict[str, Any]) -> None:
-    """Decode the gateway leak frame (``EE 34``) used by newer sensors."""
-    if len(frame) < 4:
-        return
-    # The gateway reports the sensor's alarm bit in the first payload byte.
-    result["leak"] = frame[2] != 0
-
-
-def _decode_frame(
-    profile: DeviceProfile,
-    register: int,
-    payload: bytes,
-    result: dict[str, Any],
-) -> None:
-    if dialect_for(profile).decode_frame(profile, register, payload, result):
-        return
-
-    kind = profile.kind
-    if register == 0x01 and payload:
-        if kind == KIND_PRESENCE:
-            result["presence"] = payload[0] != 0
-        elif kind == KIND_LEAK:
-            result["leak"] = payload[0] != 0
-        else:
-            result["power"] = payload[0] != 0
-    elif register == 0x04 and payload:
-        result["brightness"] = _scale_brightness(profile, payload[0])
-    elif register == 0x05 and payload:
-        _decode_register_05(profile, payload, result)
-    elif register == 0x0A and len(payload) >= 3 and payload[0] == 0x0B:
-        result["timer_enabled"] = payload[1] != 0
-        result["timer_minutes"] = (payload[2] << 8) | payload[3] if len(payload) > 3 else None
-    elif (register == 0x0A and payload) or (
-        register == 0x10 and kind in {KIND_HEATER, KIND_PURIFIER} and payload
-    ):
-        result["lock"] = payload[0] != 0
-    elif register == 0x10 and kind in {KIND_HUMIDIFIER, KIND_DEHUMIDIFIER} and len(payload) >= 4:
-        _decode_humidity_frame(payload, result)
-    elif register == 0x16 and payload:
-        result["display"] = payload[0] != 0
-    elif register == 0x18 and payload:
-        if kind == KIND_HEATER:
-            result["oscillation"] = payload[0] != 0
-        else:
-            # Humidifiers only report AA 18; there is no display setter.
-            result["display"] = payload[0] != 0
-    elif register == 0x1B and payload:
-        result["night_light"] = payload[0] != 0
-        if len(payload) > 1:
-            result["night_light_brightness"] = payload[1]
-        if len(payload) > 4:
-            result["night_light_color"] = (payload[2], payload[3], payload[4])
-    elif register == 0x1F and len(payload) >= 3:
-        # Heater2 packs swing and child lock into the same report.
-        result["oscillation"] = payload[1] != 0
-        result["lock"] = payload[2] != 0
-    elif register == 0x1A and payload:
-        if kind == KIND_HEATER and len(payload) >= 4:
-            raw = (payload[2] << 8) | payload[3]
-            if raw & 0x8000:
-                fahrenheit = (raw & 0x7FFF) / 100
-                result["target_temperature"] = round((fahrenheit - 32) * 5 / 9, 1)
-        else:
-            result["uv"] = payload[0] != 0
-    elif register == 0x17 and len(payload) >= 2:
-        result["basket_full"] = payload[1] != 0
-        result["water_shortage"] = payload[1] != 0
-    elif register == 0x19 and len(payload) >= 14:
-        # H5086 outlet power metering: voltage, current and power.
-        result["voltage"] = ((payload[7] << 8) | payload[8]) / 100
-        result["current"] = ((payload[9] << 8) | payload[10]) / 100
-        result["power_usage"] = ((payload[11] << 16) | (payload[12] << 8) | payload[13]) / 100
-    elif register == 0x1C and len(payload) >= 3:
-        # H7122 PM2.5 is big-endian; the exact byte offset is unconfirmed, so
-        # accept the documented bytes 4+5 first.
-        result["pm25"] = (payload[2] << 8) | payload[3] if len(payload) > 3 else payload[1]
-    elif register == 0x31 and payload:
-        # AA 31 <running> <speed> <direction>. Oscillation is OpenAPI-only.
-        result["power"] = payload[0] != 0
-        if len(payload) > 1:
-            result["fan_speed"] = payload[1]
-            if profile.fan_speeds:
-                result["percentage"] = round(payload[1] * 100 / profile.fan_speeds)
-    elif register == 0x36 and payload:
-        _LOGGER.debug(
-            "Unhandled 0x36 frame for %s (%s): %s",
-            profile.model_name,
-            kind,
-            payload.hex(),
-        )
-
-
-def _decode_humidity_frame(payload: bytes, result: dict[str, Any]) -> None:
-    """Decode ``AA 10 <flags> <3-byte reading>`` for generic humidifiers."""
-    apply_humidity_reading(payload, result)
-
-
-def _decode_register_05(profile: DeviceProfile, payload: bytes, result: dict[str, Any]) -> None:
-    kind = profile.kind
-    sub = payload[0]
-    if kind in LIGHT_KINDS:
-        if sub == 0x03 and len(payload) >= 4:
-            result["color"] = (payload[1], payload[2], payload[3])
-        elif sub == 0x02 and len(payload) >= 3:
-            result["effect"] = f"{(payload[1] << 8) | payload[2]:04x}"
-        elif sub == 0x15 and len(payload) >= 4:
-            result["color"] = (payload[2], payload[3], payload[4] if len(payload) > 4 else 0)
-    elif kind == KIND_HUMIDIFIER:
-        if sub == 0x00 and len(payload) >= 2:
-            result["mode"] = {1: "manual", 2: "program", 3: "auto"}.get(payload[1])
-            if payload[1] == 0x03 and len(payload) > 2:
-                result["target_humidity"] = payload[2]
-        elif sub == 0x01 and len(payload) >= 2:
-            result["mode"] = "manual"
-            result["fan_speed"] = payload[1]
-            result["percentage"] = _gear_percentage(profile, payload[1])
-        elif sub == 0x02:
-            result["mode"] = "program"
-        elif sub == 0x03 and len(payload) >= 2:
-            result["mode"] = "auto"
-            result["target_humidity"] = payload[1]
-    elif kind == KIND_KETTLE:
-        result["mode"] = str(sub)
-    else:
-        _LOGGER.debug(
-            "Unhandled 0x05 frame for %s (%s): %s",
-            profile.model_name,
-            kind,
-            payload.hex(),
-        )
-
-
-def _gear_percentage(profile: DeviceProfile, gear: int) -> int:
-    """Convert a 1-based gear to a percentage."""
-    if profile.fan_speeds <= 0:
-        return gear
-    return max(0, min(100, round(gear * 100 / profile.fan_speeds)))
-
-
-def _scale_brightness(profile: DeviceProfile, value: int) -> int:
-    if profile.brightness_max > 100:
-        return max(0, min(100, round(value * 100 / profile.brightness_max)))
-    return max(0, min(100, value))
+        decode_register(profile, register, payload, result)
 
 
 def _colour(value: dict[str, Any]) -> tuple[int, int, int]:

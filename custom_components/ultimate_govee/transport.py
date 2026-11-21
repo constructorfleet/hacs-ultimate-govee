@@ -12,7 +12,7 @@ import asyncio
 import logging
 import time
 from abc import ABC, abstractmethod
-from collections.abc import Awaitable, Callable, Iterable
+from collections.abc import Awaitable, Callable, Iterable, Iterator, Mapping
 from dataclasses import dataclass
 from enum import StrEnum
 from pathlib import Path
@@ -22,7 +22,9 @@ from .api.ble import GoveeBle
 from .api.cloud import GoveeApiError
 from .api.iot import GoveeIot
 from .api.lan import GoveeLan
+from .ble_links import BleLinkSet, BleLinkSetClosed, BleLinkSpec
 from .models import GoveeDevice
+from .options import GoveeOptions
 from .profiles import DeviceProfile
 from .protocol.codec import build_frame, bytes_to_base64
 from .protocol.command import (
@@ -64,6 +66,10 @@ class TransportUnavailable(TransportNotSent):
     """The transport cannot currently reach this device."""
 
 
+class NoTransportAvailable(GoveeApiError, TransportNotSent):
+    """No adapter could carry a command or status request for this device."""
+
+
 @dataclass(frozen=True, slots=True)
 class StatusReport:
     """A decoded-later status payload reported by a transport.
@@ -90,10 +96,49 @@ class LanObservation:
 InboundEvent = StatusReport | LanObservation
 
 
+@dataclass(frozen=True, slots=True)
+class TransportStatus(Mapping[str, Any]):
+    """The one status record every adapter reports.
+
+    The fields are the contract; the mapping view keeps diagnostics and older
+    callers (``status["lan_udp"]["connected"]``) working from the same record.
+    """
+
+    kind: TransportKind
+    supported: bool
+    enabled: bool
+    started: bool
+    connected: bool
+    links: int = 0
+
+    def as_dict(self) -> dict[str, Any]:
+        """Return the JSON-friendly shape used by diagnostics."""
+        return {
+            "kind": self.kind.value,
+            "supported": self.supported,
+            "enabled": self.enabled,
+            "started": self.started,
+            "connected": self.connected,
+            "links": self.links,
+        }
+
+    def __getitem__(self, key: str) -> Any:
+        return self.as_dict()[key]
+
+    def __iter__(self) -> Iterator[str]:
+        return iter(self.as_dict())
+
+    def __len__(self) -> int:
+        return len(self.as_dict())
+
+
 class Transport(ABC):
     """One path by which commands and status requests reach a device."""
 
     kind: TransportKind
+
+    #: Seconds between this adapter's periodic scans; 0 means every tick.
+    scan_interval: float = 0.0
 
     @property
     @abstractmethod
@@ -147,8 +192,8 @@ class Transport(ABC):
         """Request a status report or raise :class:`TransportNotSent`."""
 
     @abstractmethod
-    def status(self) -> dict[str, Any]:
-        """Return diagnostics-friendly state for this adapter."""
+    def status(self) -> TransportStatus:
+        """Return this adapter's typed status record."""
 
 
 class UnsupportedTransport(Transport):
@@ -176,14 +221,14 @@ class UnsupportedTransport(Transport):
     async def request_status(self, device: GoveeDevice) -> None:
         raise TransportUnavailable(f"{self.kind.value} is not implemented")
 
-    def status(self) -> dict[str, Any]:
-        return {
-            "kind": self.kind.value,
-            "supported": False,
-            "enabled": False,
-            "started": False,
-            "connected": False,
-        }
+    def status(self) -> TransportStatus:
+        return TransportStatus(
+            kind=self.kind,
+            supported=False,
+            enabled=False,
+            started=False,
+            connected=False,
+        )
 
 
 class LocalMqttTransport(UnsupportedTransport):
@@ -210,13 +255,13 @@ class BleGattTransport(Transport):
         available: bool | None = None,
         manager_factory: Callable[[Any, str, str, Callable[[bytes], None]], Any] | None = None,
         on_report: Callable[[StatusReport], None] | None = None,
+        max_connections: int = 8,
     ) -> None:
         self.hass = hass
         self.enabled = _bluetooth_available(hass) if available is None else available
         self._manager_factory = manager_factory or _default_ble_manager
         self._on_report = on_report
-        self._managers: dict[str, Any] = {}
-        self._started = False
+        self._links = BleLinkSet(self._open_link, max_links=max_connections)
 
     @property
     def supported(self) -> bool:
@@ -224,38 +269,28 @@ class BleGattTransport(Transport):
 
     @property
     def connected(self) -> bool:
-        return any(
-            bool(getattr(manager, "connected", False)) for manager in self._managers.values()
-        )
+        return self._links.connected
+
+    @property
+    def connection_count(self) -> int:
+        """Return the number of open per-device links."""
+        return self._links.count
 
     def supports(self, device: GoveeDevice) -> bool:
         return self.enabled and bool(device.ble_address)
 
     async def async_start(self) -> None:
-        """Prepare the transport.
-
-        Connections are opened on demand, so starting only records that BLE is
-        available. This keeps the coordinator's start/stop contract explicit.
-        """
-        self._started = self.enabled
+        """Open the connection set so links may be created on demand."""
         if self.enabled:
+            await self._links.async_start()
             _LOGGER.debug("BLE GATT transport is available")
         else:
+            await self._links.async_stop()
             _LOGGER.debug("BLE GATT transport is unavailable; using other transports")
 
     async def async_stop(self) -> None:
-        """Close every per-device BLE connection."""
-        self._started = False
-        managers = list(self._managers.values())
-        self._managers.clear()
-        for manager in managers:
-            stop = getattr(manager, "async_stop", None)
-            if stop is None:
-                continue
-            try:
-                await stop()
-            except Exception as err:
-                _LOGGER.debug("BLE shutdown failed: %s", err)
+        """Close every per-device BLE connection and refuse new ones."""
+        await self._links.async_stop()
 
     def supports_command(self, command: Command) -> bool:
         return command.action in BLE_ACTIONS
@@ -264,7 +299,12 @@ class BleGattTransport(Transport):
         if not self.supports(device):
             raise TransportUnavailable(f"{device.name} has no BLE GATT path")
         frames = _ble_frames(command, device.profile)
-        manager = await self._async_manager(device)
+        try:
+            manager = await self._async_manager(device)
+        except TransportNotSent:
+            raise
+        except Exception as err:  # an open failure is a not-sent result
+            raise TransportNotSent(str(err)) from err
         try:
             await manager.async_send_frames(frames)
         except Exception as err:
@@ -275,11 +315,18 @@ class BleGattTransport(Transport):
                 err,
             )
             raise TransportNotSent(str(err)) from err
+        finally:
+            await self._async_release_evicted(device.device_id, manager)
 
     async def request_status(self, device: GoveeDevice) -> None:
         if not self.supports(device):
             raise TransportUnavailable(f"{device.name} has no BLE GATT path")
-        manager = await self._async_manager(device)
+        try:
+            manager = await self._async_manager(device)
+        except TransportNotSent:
+            raise
+        except Exception as err:
+            raise TransportNotSent(str(err)) from err
         try:
             await manager.async_request_status()
         except Exception as err:
@@ -290,29 +337,32 @@ class BleGattTransport(Transport):
                 err,
             )
             raise TransportNotSent(str(err)) from err
+        finally:
+            await self._async_release_evicted(device.device_id, manager)
+
+    async def _async_release_evicted(self, device_id: str, manager: Any) -> None:
+        """Close a link that stopped being current while it was sending."""
+        if not self._links.owns(device_id, manager):
+            await self._links.async_close(manager)
 
     async def _async_manager(self, device: GoveeDevice) -> Any:
         address = device.ble_address
         if not address:
             raise TransportUnavailable(f"{device.name} has no BLE address")
-        manager = self._managers.get(device.device_id)
-        if manager is not None and getattr(manager, "address", address) == address:
-            return manager
-        if manager is not None:
-            stop = getattr(manager, "async_stop", None)
-            if stop is not None:
-                try:
-                    await stop()
-                except Exception as err:
-                    _LOGGER.debug("BLE reconnect cleanup failed for %s: %s", device.name, err)
-        manager = self._manager_factory(
+        try:
+            return await self._links.async_acquire(
+                BleLinkSpec(device.device_id, address, device.name)
+            )
+        except BleLinkSetClosed as err:
+            raise TransportUnavailable("The BLE GATT transport is stopped") from err
+
+    def _open_link(self, spec: BleLinkSpec) -> Any:
+        return self._manager_factory(
             self.hass,
-            address,
-            device.name,
-            self._notification_callback(device.device_id),
+            spec.address,
+            spec.name,
+            self._notification_callback(spec.device_id),
         )
-        self._managers[device.device_id] = manager
-        return manager
 
     def _notification_callback(self, device_id: str) -> Callable[[bytes], None]:
         def _handle(frame: bytes) -> None:
@@ -337,14 +387,15 @@ class BleGattTransport(Transport):
         if self._on_report is not None:
             self._on_report(StatusReport(device_id, {"op": {"command": [bytes_to_base64(data)]}}))
 
-    def status(self) -> dict[str, Any]:
-        return {
-            "kind": self.kind.value,
-            "supported": self.supported,
-            "enabled": self.enabled,
-            "started": self._started,
-            "connected": self.connected,
-        }
+    def status(self) -> TransportStatus:
+        return TransportStatus(
+            kind=self.kind,
+            supported=self.supported,
+            enabled=self.enabled,
+            started=self._links.started,
+            connected=self.connected,
+            links=self._links.count,
+        )
 
 
 class BleBroadcastTransport(UnsupportedTransport):
@@ -618,15 +669,15 @@ class CloudMqttTransport(Transport):
         if self._on_event is not None:
             self._on_event(self.event(payload))
 
-    def status(self) -> dict[str, Any]:
+    def status(self) -> TransportStatus:
         client = self._iot
-        return {
-            "kind": self.kind.value,
-            "supported": self.supported,
-            "enabled": self.enabled,
-            "started": client is not None,
-            "connected": bool(client and client.connected),
-        }
+        return TransportStatus(
+            kind=self.kind,
+            supported=self.supported,
+            enabled=self.enabled,
+            started=client is not None,
+            connected=bool(client and client.connected),
+        )
 
 
 class LanUdpTransport(Transport):
@@ -644,11 +695,13 @@ class LanUdpTransport(Transport):
         loop: asyncio.AbstractEventLoop | None = None,
         *,
         enabled: bool,
+        scan_interval: float = 0.0,
         on_event: Callable[[InboundEvent], None] | None = None,
         on_endpoint_lost: Callable[[str], None] | None = None,
         client: GoveeLan | None = None,
     ) -> None:
         self.enabled = enabled
+        self.scan_interval = float(scan_interval)
         self._loop = loop
         self._on_event = on_event
         self._on_endpoint_lost = on_endpoint_lost
@@ -765,15 +818,77 @@ class LanUdpTransport(Transport):
         if self._on_endpoint_lost is not None:
             self._on_endpoint_lost(device_id)
 
-    def status(self) -> dict[str, Any]:
+    def status(self) -> TransportStatus:
         client = self._lan
-        return {
-            "kind": self.kind.value,
-            "supported": self.supported,
-            "enabled": self.enabled,
-            "started": client is not None,
-            "connected": client is not None,
-        }
+        return TransportStatus(
+            kind=self.kind,
+            supported=self.supported,
+            enabled=self.enabled,
+            started=client is not None,
+            connected=client is not None,
+        )
+
+
+@dataclass(frozen=True, slots=True)
+class TransportContext:
+    """The non-option inputs the router needs to build adapters."""
+
+    hass: Any
+    account_id: str = ""
+    client_id: str = ""
+    account_topic: str = ""
+    cert_dir: Path | None = None
+    certificate: Callable[[], Awaitable[dict[str, Any]]] | None = None
+    on_event: Callable[[InboundEvent], None] | None = None
+    on_endpoint_lost: Callable[[str], None] | None = None
+
+
+TransportBuilder = Callable[[TransportContext, GoveeOptions], Transport | None]
+
+
+def _build_ble_gatt(context: TransportContext, _options: GoveeOptions) -> Transport:
+    return BleGattTransport(context.hass, on_report=context.on_event)
+
+
+def _build_ble_broadcast(_context: TransportContext, _options: GoveeOptions) -> Transport:
+    return BleBroadcastTransport()
+
+
+def _build_lan_udp(context: TransportContext, options: GoveeOptions) -> Transport:
+    return LanUdpTransport(
+        context.hass.loop,
+        enabled=options.enable_lan,
+        scan_interval=options.lan_scan_interval,
+        on_event=context.on_event,
+        on_endpoint_lost=context.on_endpoint_lost,
+    )
+
+
+def _build_local_mqtt(_context: TransportContext, _options: GoveeOptions) -> Transport:
+    return LocalMqttTransport()
+
+
+def _build_cloud_mqtt(context: TransportContext, options: GoveeOptions) -> Transport:
+    return CloudMqttTransport(
+        enabled=options.enable_iot,
+        account_id=context.account_id,
+        client_id=context.client_id,
+        account_topic=context.account_topic,
+        cert_dir=context.cert_dir,
+        loop=context.hass.loop,
+        certificate=context.certificate,
+        on_event=context.on_event,
+    )
+
+
+#: One row per known path. Adding a Transport means adding one builder here.
+DEFAULT_TRANSPORT_BUILDERS: tuple[TransportBuilder, ...] = (
+    _build_ble_gatt,
+    _build_ble_broadcast,
+    _build_lan_udp,
+    _build_local_mqtt,
+    _build_cloud_mqtt,
+)
 
 
 class CommandRouter:
@@ -790,6 +905,23 @@ class CommandRouter:
         self._transports: dict[TransportKind, Transport] = {}
         for transport in transports:
             self.register(transport)
+        self._last_scan: dict[TransportKind, float] = {}
+
+    @classmethod
+    def from_options(
+        cls,
+        options: GoveeOptions,
+        context: TransportContext,
+        *,
+        builders: Iterable[TransportBuilder] = DEFAULT_TRANSPORT_BUILDERS,
+    ) -> CommandRouter:
+        """Build the adapter set from normalized options and one context.
+
+        A new Transport registers one builder; callers keep constructing the
+        router, never the concrete adapters.
+        """
+        transports = (build(context, options) for build in builders)
+        return cls(transport for transport in transports if transport is not None)
 
     def register(self, transport: Transport) -> None:
         """Add one adapter; a later adapter for the same kind replaces it."""
@@ -809,9 +941,20 @@ class CommandRouter:
         for transport in reversed(tuple(self._transports.values())):
             await transport.async_stop()
 
-    async def async_scan(self) -> None:
-        """Run each adapter's periodic discovery hook."""
+    async def async_scan(self, now: float | None = None) -> None:
+        """Run each adapter's discovery hook when its cadence is due.
+
+        The router owns the clock, so adapters declare ``scan_interval`` and
+        callers simply tick. ``now`` is injectable for tests.
+        """
+        observed = time.monotonic() if now is None else now
         for transport in self._transports.values():
+            interval = transport.scan_interval
+            if interval > 0:
+                last = self._last_scan.get(transport.kind, 0.0)
+                if observed - last < interval:
+                    continue
+            self._last_scan[transport.kind] = observed
             await transport.async_scan()
 
     def _ordered(self) -> Iterable[Transport]:
@@ -838,7 +981,7 @@ class CommandRouter:
             except TransportNotSent:
                 continue
             return transport.kind
-        raise GoveeApiError(f"No transport is available for {device.name}")
+        raise NoTransportAvailable(f"No transport is available for {device.name}")
 
     async def request_status(self, device: GoveeDevice) -> TransportKind:
         """Request status and return the transport that accepted it."""
@@ -850,8 +993,12 @@ class CommandRouter:
             except TransportNotSent:
                 continue
             return transport.kind
-        raise GoveeApiError(f"No transport is available for {device.name}")
+        raise NoTransportAvailable(f"No transport is available for {device.name}")
 
-    def status(self) -> dict[str, Any]:
-        """Return every adapter's state, including unsupported ones."""
+    def status(self) -> dict[str, TransportStatus]:
+        """Return every adapter's typed status, including unsupported ones."""
         return {transport.kind.value: transport.status() for transport in self._transports.values()}
+
+    def status_dict(self) -> dict[str, dict[str, Any]]:
+        """Return the JSON-friendly diagnostics shape for every adapter."""
+        return {kind: record.as_dict() for kind, record in self.status().items()}

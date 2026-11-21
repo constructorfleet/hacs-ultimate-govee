@@ -18,8 +18,18 @@ from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
 from .coordinator import GoveeCoordinator
 from .entity import GoveeEntity
-from .entity_plan import PLATFORM_LIGHT, entities_for_platform
-from .protocol import commands
+from .entity_plan import (
+    LIGHT_OPERATION_BRIGHTNESS,
+    LIGHT_OPERATION_COLOR,
+    LIGHT_OPERATION_COLOR_TEMP,
+    LIGHT_OPERATION_EFFECT,
+    LIGHT_OPERATION_POWER,
+    PLATFORM_LIGHT,
+    ControlContext,
+    ControlResult,
+    EntitySpec,
+    entities_for_platform,
+)
 
 
 async def async_setup_entry(
@@ -30,7 +40,7 @@ async def async_setup_entry(
     """Set up light entities."""
     coordinator: GoveeCoordinator = entry.runtime_data
     async_add_entities(
-        GoveeLight(coordinator, device.device_id, spec.key)
+        GoveeLight(coordinator, device.device_id, spec)
         for device in coordinator.devices.values()
         for spec in entities_for_platform(device.profile, PLATFORM_LIGHT)
     )
@@ -43,9 +53,10 @@ class GoveeLight(GoveeEntity, LightEntity):
         self,
         coordinator: GoveeCoordinator,
         device_id: str,
-        key: str = "light",
+        spec: EntitySpec,
     ) -> None:
-        super().__init__(coordinator, device_id, key)
+        super().__init__(coordinator, device_id, spec.key)
+        self._spec = spec
         profile = self.device.profile
         modes: set[ColorMode] = set()
         if profile.supports_color:
@@ -120,25 +131,20 @@ class GoveeLight(GoveeEntity, LightEntity):
     async def async_turn_on(self, **kwargs: Any) -> None:
         """Turn the light on and apply any requested attributes."""
         if not self.device.state.power:
-            await self._send(commands.power(self.device.profile, True), {"power": True})
+            await self._async_send(self._control(LIGHT_OPERATION_POWER, True))
 
         if ATTR_BRIGHTNESS in kwargs:
-            brightness = round(int(kwargs[ATTR_BRIGHTNESS]) * 100 / 255)
-            await self._send(
-                commands.brightness(self.device.profile, brightness),
-                {"brightness": brightness},
+            await self._async_send(
+                self._control(LIGHT_OPERATION_BRIGHTNESS, kwargs[ATTR_BRIGHTNESS])
             )
 
         if ATTR_RGB_COLOR in kwargs:
-            red, green, blue = kwargs[ATTR_RGB_COLOR]
-            await self._send(
-                commands.color(red, green, blue),
-                {"color": (red, green, blue), "color_temp": None},
-            )
+            await self._async_send(self._control(LIGHT_OPERATION_COLOR, kwargs[ATTR_RGB_COLOR]))
 
         if ATTR_COLOR_TEMP_KELVIN in kwargs:
-            kelvin = int(kwargs[ATTR_COLOR_TEMP_KELVIN])
-            await self._send(commands.color_temp(kelvin), {"color_temp": kelvin})
+            await self._async_send(
+                self._control(LIGHT_OPERATION_COLOR_TEMP, kwargs[ATTR_COLOR_TEMP_KELVIN])
+            )
 
         if ATTR_EFFECT in kwargs:
             await self._async_set_effect(str(kwargs[ATTR_EFFECT]))
@@ -154,11 +160,24 @@ class GoveeLight(GoveeEntity, LightEntity):
         )
         if effect is None:
             return
-        await self._send(
-            commands.effect(list(effect.frames)),
-            {"effect": name, "power": True},
-        )
+        await self._async_send(self._control(LIGHT_OPERATION_EFFECT, name, frames=effect.frames))
 
     async def async_turn_off(self, **kwargs: Any) -> None:
         """Turn the light off."""
-        await self._send(commands.power(self.device.profile, False), {"power": False})
+        await self._async_send(self._control(LIGHT_OPERATION_POWER, False))
+
+    def _control(self, operation: str, value: Any = None, **parameters: Any) -> ControlResult:
+        if self._spec.control is None:
+            raise ValueError("The light plan has no control")
+        return self._spec.control(
+            ControlContext(
+                self.device.profile,
+                self.device.state,
+                value,
+                operation=operation,
+                parameters=parameters,
+            )
+        )
+
+    async def _async_send(self, result: ControlResult) -> None:
+        await self._send(result.command, dict(result.optimistic))

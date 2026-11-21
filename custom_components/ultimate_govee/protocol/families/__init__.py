@@ -1,14 +1,18 @@
-"""Family dialect registry.
+"""Family dialect registry and dispatch.
 
 The registry maps an explicit dialect name to the module that owns its encode
 and decode. ``profiles.py`` assigns the name per SKU; nothing here infers a
 dialect from kind, category or SKU prefix.
+
+Encoding asks the SKU's dialect first and then the generic fallback; decoding
+follows the same rule, with the generic dialect owning the universal registers.
 """
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
+from ...profiles import SKU_ROWS
 from .base import FamilyDialect
 from .ceiling_fan import CeilingFanDialect
 from .dehumidifier import DehumidifierDialect
@@ -42,6 +46,38 @@ DIALECTS: dict[str, FamilyDialect] = {
 }
 
 
+def _validate_sku_rows() -> None:
+    """Fail at import when a SKU row names a dialect nobody implements."""
+    missing = {row.dialect for row in SKU_ROWS.values()} - set(DIALECTS)
+    if missing:
+        raise ValueError(f"SKU rows reference unknown dialects: {sorted(missing)}")
+
+
+_validate_sku_rows()
+
+
 def dialect_for(profile: DeviceProfile) -> FamilyDialect:
     """Return the dialect the profile assigned, falling back explicitly."""
     return DIALECTS.get(profile.dialect, GENERIC)
+
+
+def decode_register(
+    profile: DeviceProfile,
+    register: int,
+    payload: bytes,
+    result: dict[str, Any],
+) -> None:
+    """Decode one register with the SKU's dialect, then the generic fallback."""
+    dialect = dialect_for(profile)
+    if dialect.decode_frame(profile, register, payload, result):
+        return
+    if dialect is not GENERIC:
+        GENERIC.decode_frame(profile, register, payload, result)
+
+
+def decode_raw(profile: DeviceProfile, frame: bytes, result: dict[str, Any]) -> bool:
+    """Decode a whole-frame report with the SKU's dialect, then the fallback."""
+    dialect = dialect_for(profile)
+    if dialect.decode_raw(profile, frame, result):
+        return True
+    return dialect is not GENERIC and GENERIC.decode_raw(profile, frame, result)
