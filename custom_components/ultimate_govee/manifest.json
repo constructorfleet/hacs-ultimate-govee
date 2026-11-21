@@ -8,6 +8,9 @@
   "documentation": "https://github.com/constructorfleet/hacs-ultimate-govee",
   "integration_type": "hub",
   "iot_class": "cloud_polling",
+  "dependencies": [
+    "bluetooth"
+  ],
   "issue_tracker": "https://github.com/constructorfleet/hacs-ultimate-govee/issues",
   "requirements": [
     "paho-mqtt>=2.1.0"

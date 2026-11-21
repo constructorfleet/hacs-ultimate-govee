@@ -28,6 +28,8 @@ REDACTED_KEYS = {
     "wifiMac",
     "wifiName",
     "bleName",
+    "bleAddress",
+    "ble_address",
     "address",
     "topic",
     "p12",
@@ -53,21 +55,24 @@ async def async_get_config_entry_diagnostics(
             "enabled": coordinator.enable_lan,
         },
         "devices": [
-            {
-                "device_id": device.device_id,
-                "sku": device.sku,
-                "name": device.name,
-                "firmware": device.firmware,
-                "hardware": device.hardware,
-                "profile": {
-                    "kind": device.profile.kind,
-                    "features": sorted(device.profile.features),
-                    "model_name": device.profile.model_name,
-                },
-                "lan_ip": device.lan_ip,
-                "state": _redact(asdict(device.state)),
-                "settings": _redact(device.settings),
-            }
+            _redact(
+                {
+                    "device_id": device.device_id,
+                    "sku": device.sku,
+                    "name": device.name,
+                    "firmware": device.firmware,
+                    "hardware": device.hardware,
+                    "profile": {
+                        "kind": device.profile.kind,
+                        "features": sorted(device.profile.features),
+                        "model_name": device.profile.model_name,
+                    },
+                    "lan_ip": device.lan_ip,
+                    "ble_address": device.ble_address,
+                    "state": asdict(device.state),
+                    "settings": device.settings,
+                }
+            )
             for device in coordinator.devices.values()
         ],
     }

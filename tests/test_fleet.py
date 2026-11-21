@@ -109,6 +109,50 @@ def test_reconcile_skips_ignored_devices() -> None:
     assert fleet.get("device-2") is None
 
 
+def test_ble_address_is_read_from_cloud_settings() -> None:
+    fleet = Fleet()
+
+    fleet.reconcile([_raw("device-1", settings={"address": "aa:bb:cc:dd:ee:ff"})])
+
+    device = fleet.get("device-1")
+    assert device is not None
+    assert device.ble_address == "AA:BB:CC:DD:EE:FF"
+
+
+def test_ble_address_is_read_from_the_device_extension() -> None:
+    raw = _raw("device-1")
+    raw["deviceExt"]["bleAddress"] = "11:22:33:44:55:66"
+    fleet = Fleet()
+
+    fleet.reconcile([raw])
+
+    device = fleet.get("device-1")
+    assert device is not None
+    assert device.ble_address == "11:22:33:44:55:66"
+
+
+def test_ble_name_is_not_invented_as_an_address() -> None:
+    fleet = Fleet()
+
+    fleet.reconcile([_raw("device-1", settings={"bleName": "GVH6001_1234"})])
+
+    device = fleet.get("device-1")
+    assert device is not None
+    assert device.ble_address is None
+
+
+def test_ble_address_refreshes_with_cloud_metadata() -> None:
+    fleet = Fleet()
+    fleet.reconcile([_raw("device-1")])
+    device = fleet.get("device-1")
+    assert device is not None
+    assert device.ble_address is None
+
+    fleet.reconcile([_raw("device-1", settings={"bleAddress": "AA:BB:CC:DD:EE:FF"})])
+
+    assert device.ble_address == "AA:BB:CC:DD:EE:FF"
+
+
 def test_profile_is_fixed_for_the_entry_lifetime() -> None:
     fleet = Fleet()
     fleet.reconcile([_raw("device-1", sku="H6002")])
