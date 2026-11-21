@@ -1,4 +1,6 @@
+aiousbwatcher==1.1.2
 paho-mqtt==2.1.0
 pytest-homeassistant-custom-component==0.13.375
 pytest-asyncio==1.4.0
 ruff==0.17.6
+serialx==1.11.0
