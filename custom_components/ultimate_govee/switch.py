@@ -122,7 +122,7 @@ class GoveeSwitch(GoveeEntity, SwitchEntity):
             await self._send(commands.lock(profile, on), {"lock": on})
             return
         if self._key == FEATURE_UV:
-            await self._send(commands.uv(on), {"uv": on})
+            await self._send(commands.uv(profile, on), {"uv": on})
             return
         if self._key == FEATURE_OSCILLATION:
             await self._send(commands.oscillation(profile, on), {"oscillation": on})

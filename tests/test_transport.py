@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import base64
 import logging
 from typing import Any
 
@@ -11,7 +12,14 @@ import pytest
 from custom_components.ultimate_govee.api.cloud import GoveeApiError
 from custom_components.ultimate_govee.models import DeviceState, GoveeDevice
 from custom_components.ultimate_govee.profiles import profile_for
-from custom_components.ultimate_govee.protocol.commands import WireCommand
+from custom_components.ultimate_govee.protocol import commands
+from custom_components.ultimate_govee.protocol.command import (
+    ACTION_CLOUD,
+    ACTION_FRAMES,
+    Command,
+    frames_command,
+    power_command,
+)
 from custom_components.ultimate_govee.transport import (
     BleBroadcastTransport,
     BleGattTransport,
@@ -81,14 +89,91 @@ class FakeLan:
         self.statuses.append(ip)
 
 
+def _b64(data: bytes) -> str:
+    return base64.b64encode(data).decode("ascii")
+
+
 def test_cloud_transport_sends_envelope_fields() -> None:
     iot = FakeIot()
     transport = CloudMqttTransport(lambda: iot, enabled=True)
-    command = WireCommand("ptReal", {"command": ["frame"]}, cmd_version=2, msg_type=0)
+    command = Command(
+        ACTION_FRAMES,
+        {"frames": (b"frame",), "strategy": "ptReal", "lan": True},
+        cmd_version=2,
+        msg_type=0,
+    )
 
     asyncio.run(transport.send(device(), command))
 
-    assert iot.sent == [("topic/device-1", "ptReal", {"command": ["frame"]}, 2, 0)]
+    assert iot.sent == [("topic/device-1", "ptReal", {"command": [_b64(b"frame")]}, 2, 0)]
+
+
+def test_cloud_power_uses_profile_values() -> None:
+    iot = FakeIot()
+    transport = CloudMqttTransport(lambda: iot, enabled=True)
+    target = device(sku="H5080", profile=profile_for("H5080"))
+
+    asyncio.run(transport.send(target, commands.power(target.profile, True)))
+    asyncio.run(transport.send(target, commands.power(target.profile, False)))
+
+    assert iot.sent == [
+        ("topic/device-1", "turn", {"val": 17}, 0, 1),
+        ("topic/device-1", "turn", {"val": 16}, 0, 1),
+    ]
+
+
+def test_cloud_brightness_scales_by_profile() -> None:
+    iot = FakeIot()
+    transport = CloudMqttTransport(lambda: iot, enabled=True)
+    target = device(sku="H6002", profile=profile_for("H6002"))
+
+    asyncio.run(transport.send(target, commands.brightness(target.profile, 50)))
+
+    assert iot.sent == [("topic/device-1", "brightness", {"val": 127}, 0, 1)]
+
+
+def test_cloud_gang_power_uses_the_magic_values() -> None:
+    iot = FakeIot()
+    transport = CloudMqttTransport(lambda: iot, enabled=True)
+    profile = profile_for("H5160")
+    target = device(sku="H5160", profile=profile)
+
+    for gang in range(3):
+        asyncio.run(transport.send(target, commands.gang_power(profile, gang, True)))
+
+    assert [data["val"] for _, _, data, _, _ in iot.sent] == [17, 34, 68]
+
+
+def test_cloud_colour_uses_the_colourwc_envelope() -> None:
+    iot = FakeIot()
+    transport = CloudMqttTransport(lambda: iot, enabled=True)
+
+    asyncio.run(transport.send(device(), commands.color(10, 20, 30)))
+
+    assert iot.sent == [
+        (
+            "topic/device-1",
+            "colorwc",
+            {"color": {"r": 10, "g": 20, "b": 30}, "colorTemInKelvin": 0},
+            0,
+            1,
+        )
+    ]
+
+
+def test_cloud_passthrough_preserves_the_account_action() -> None:
+    iot = FakeIot()
+    transport = CloudMqttTransport(lambda: iot, enabled=True)
+    command = Command(
+        ACTION_CLOUD,
+        {"command": "ptReal", "data": {"command": ["frame"]}},
+        cmd_version=3,
+        msg_type=0,
+    )
+
+    asyncio.run(transport.send(device(), command))
+
+    assert iot.sent == [("topic/device-1", "ptReal", {"command": ["frame"]}, 3, 0)]
 
 
 def test_lan_transport_failure_clears_endpoint() -> None:
@@ -96,13 +181,26 @@ def test_lan_transport_failure_clears_endpoint() -> None:
     lan.fail = True
     transport = LanUdpTransport(lambda: lan, enabled=True)
     target = device(lan_ip="192.168.1.20")
-    command = WireCommand("turn", {"val": 1}, lan_cmd="turn", lan_data={"value": 1})
 
     with pytest.raises(TransportNotSent):
-        asyncio.run(transport.send(target, command))
+        asyncio.run(transport.send(target, power_command(on=True)))
 
     assert target.lan_ip is None
     assert target.lan_last_seen == 0.0
+
+
+def test_lan_power_uses_plain_on_off_values() -> None:
+    lan = FakeLan()
+    transport = LanUdpTransport(lambda: lan, enabled=True)
+    target = device(lan_ip="192.168.1.20")
+
+    asyncio.run(transport.send(target, commands.power(target.profile, True)))
+    asyncio.run(transport.send(target, commands.gang_power(profile_for("H5160"), 2, True)))
+
+    assert lan.sent == [
+        ("192.168.1.20", "turn", {"value": 1}),
+        ("192.168.1.20", "turn", {"value": 68}),
+    ]
 
 
 def test_router_prefers_lan_and_falls_back_to_cloud() -> None:
@@ -116,15 +214,14 @@ def test_router_prefers_lan_and_falls_back_to_cloud() -> None:
         )
     )
     target = device(lan_ip="192.168.1.20")
-    command = WireCommand("turn", {"val": 1}, lan_cmd="turn", lan_data={"value": 1})
 
-    used = asyncio.run(router.send(target, command))
+    used = asyncio.run(router.send(target, power_command(on=True)))
 
     assert used is TransportKind.CLOUD_MQTT
     assert iot.sent == [("topic/device-1", "turn", {"val": 1}, 0, 1)]
 
 
-def test_router_skips_lan_without_a_lan_payload() -> None:
+def test_router_skips_lan_without_a_lan_capable_command() -> None:
     lan = FakeLan()
     iot = FakeIot()
     router = CommandRouter(
@@ -134,13 +231,33 @@ def test_router_skips_lan_without_a_lan_payload() -> None:
         )
     )
     target = device(lan_ip="192.168.1.20")
-    command = WireCommand("ptReal", {"command": ["frame"]})
+    command = frames_command(b"frame", lan=False)
 
     used = asyncio.run(router.send(target, command))
 
     assert used is TransportKind.CLOUD_MQTT
     assert lan.sent == []
-    assert iot.sent == [("topic/device-1", "ptReal", {"command": ["frame"]}, 0, 1)]
+    assert iot.sent == [("topic/device-1", "ptReal", {"command": [_b64(b"frame")]}, 0, 1)]
+
+
+def test_router_keeps_cloud_actions_off_lan_and_ble() -> None:
+    lan = FakeLan()
+    iot = FakeIot()
+    router = CommandRouter(
+        (
+            BleGattTransport(available=True),
+            LanUdpTransport(lambda: lan, enabled=True),
+            CloudMqttTransport(lambda: iot, enabled=True),
+        )
+    )
+    target = device(lan_ip="192.168.1.20", ble_address="AA:BB:CC:DD:EE:FF")
+    command = Command(ACTION_CLOUD, {"command": "turn", "data": {"val": 1}})
+
+    used = asyncio.run(router.send(target, command))
+
+    assert used is TransportKind.CLOUD_MQTT
+    assert lan.sent == []
+    assert iot.sent == [("topic/device-1", "turn", {"val": 1}, 0, 1)]
 
 
 def test_router_status_includes_unsupported_adapters() -> None:
@@ -236,10 +353,9 @@ def test_lan_transport_logs_send_failure(caplog: Any) -> None:
     lan.fail = True
     transport = LanUdpTransport(lambda: lan, enabled=True)
     target = device(lan_ip="192.168.1.20")
-    command = WireCommand("turn", {"val": 1}, lan_cmd="turn", lan_data={"value": 1})
 
     with pytest.raises(TransportNotSent):
-        asyncio.run(transport.send(target, command))
+        asyncio.run(transport.send(target, power_command(on=True)))
 
     assert "LAN command failed" in caplog.text
     assert "192.168.1.20" in caplog.text

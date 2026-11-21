@@ -53,7 +53,7 @@ A device condition reported by the device, such as water lack, ice full, or a do
 _Avoid_: setting, error.
 
 **Wire command**:
-A command encoded for one transport, carrying the payload and envelope metadata that transport needs.
+The per-transport encoding of a Command, carrying the payload and envelope metadata that transport needs. Each Transport owns its own Wire command; a Wire command never crosses the adapter seam.
 _Avoid_: packet, payload, message.
 
 **Transport**:

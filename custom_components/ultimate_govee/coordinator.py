@@ -34,7 +34,7 @@ from .effects import EffectsLibrary
 from .fleet import Fleet
 from .models import DeviceState, GoveeDevice
 from .options import GoveeOptions
-from .protocol.commands import WireCommand
+from .protocol.command import ACTION_CLOUD, Command
 from .protocol.state import decode_message
 from .tap_to_runs import TapAction, TapToRun, parse_tap_to_runs
 from .transport import (
@@ -252,7 +252,7 @@ class GoveeCoordinator(DataUpdateCoordinator[GoveeData]):
     async def async_send(
         self,
         device: GoveeDevice,
-        command: WireCommand,
+        command: Command,
         *,
         optimistic: DeviceState | Mapping[str, Any] | None = None,
     ) -> None:
@@ -291,9 +291,12 @@ class GoveeCoordinator(DataUpdateCoordinator[GoveeData]):
                 )
                 continue
             matched += 1
-            command = WireCommand(
-                cmd=action.command,
-                data=dict(action.data),
+            # A tap-to-run is an account-defined action whose wire shape only
+            # the cloud API defines. LAN and BLE decline it; the router falls
+            # back only when a transport that claimed it did not send.
+            command = Command(
+                ACTION_CLOUD,
+                {"command": action.command, "data": dict(action.data)},
                 cmd_version=action.cmd_version,
                 msg_type=action.msg_type,
             )
