@@ -1,4 +1,4 @@
-"""Coordinator that owns the Govee transports and the device fleet."""
+"""Coordinator that wires the transport router to the device fleet."""
 
 from __future__ import annotations
 
@@ -17,8 +17,6 @@ from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, Upda
 
 from .api.auth import GoveeAuth, GoveeAuthError
 from .api.cloud import GoveeApiError, GoveeCloud
-from .api.iot import GoveeIot
-from .api.lan import GoveeLan
 from .const import (
     CONF_ACCESS_TOKEN,
     CONF_ACCOUNT_ID,
@@ -93,25 +91,49 @@ class GoveeCoordinator(DataUpdateCoordinator[GoveeData]):
             account_topic=data.get(CONF_ACCOUNT_TOPIC),
         )
         self.cloud = GoveeCloud(session, self.auth)
-        self.fleet = Fleet()
+        self._fleet = Fleet()
+        self._fleet.add_listener(self._handle_fleet_changed)
         self.effects_library = EffectsLibrary(self.cloud, enabled=self.enable_effects)
         self.tap_to_runs: list[TapToRun] | None = None
-        self._cert_dir = cert_dir
-        self._iot: GoveeIot | None = None
-        self._lan: GoveeLan | None = None
-        self._iot_started = False
-        self._lan_started = False
-        self._ble = BleGattTransport(self.hass, on_report=self._handle_inbound)
         self.router = CommandRouter(
             (
-                self._ble,
+                BleGattTransport(self.hass, on_report=self._handle_inbound),
                 BleBroadcastTransport(),
-                LanUdpTransport(lambda: self._lan, enabled=self.enable_lan),
+                LanUdpTransport(
+                    self.hass.loop,
+                    enabled=self.enable_lan,
+                    on_event=self._handle_inbound,
+                    on_endpoint_lost=self._handle_lan_endpoint_lost,
+                ),
                 LocalMqttTransport(),
-                CloudMqttTransport(lambda: self._iot, enabled=self.enable_iot),
+                CloudMqttTransport(
+                    enabled=self.enable_iot,
+                    account_id=self.auth.account_id or "",
+                    client_id=self.auth.client_id or "",
+                    account_topic=self.auth.account_topic or "",
+                    cert_dir=cert_dir,
+                    loop=self.hass.loop,
+                    certificate=self.cloud.get_iot_certificate,
+                    on_event=self._handle_inbound,
+                ),
             )
         )
         self._last_lan_scan = 0.0
+        self._refreshing = False
+
+    @property
+    def fleet(self) -> Fleet:
+        """Return the reconciled device fleet."""
+        return self._fleet
+
+    @fleet.setter
+    def fleet(self, fleet: Fleet) -> None:
+        """Replace the fleet and keep the coordinator's change hook attached."""
+        if fleet is self._fleet:
+            return
+        self._fleet.remove_listener(self._handle_fleet_changed)
+        self._fleet = fleet
+        fleet.add_listener(self._handle_fleet_changed)
 
     @property
     def devices(self) -> Mapping[str, GoveeDevice]:
@@ -119,55 +141,37 @@ class GoveeCoordinator(DataUpdateCoordinator[GoveeData]):
         return self.fleet.by_id
 
     async def async_setup(self) -> None:
-        """Log in and start the enabled transports."""
+        """Log in and start every registered transport."""
         await self.auth.ensure_valid()
-        await self._ble.async_start()
-        if self.enable_iot:
-            await self._async_start_iot()
-        if self.enable_lan:
-            await self._async_start_lan()
+        await self.router.async_start()
 
     async def async_shutdown(self) -> None:
-        """Stop the transports and flush tokens."""
-        await self._ble.async_stop()
-        if self._iot is not None:
-            await self._iot.async_stop()
-            self._iot = None
-        if self._lan is not None:
-            await self._lan.async_stop()
-            self._lan = None
+        """Stop every transport and flush tokens."""
+        await self.router.async_stop()
         await super().async_shutdown()
 
     async def _async_update_data(self) -> GoveeData:
+        self._refreshing = True
         try:
-            await self.auth.ensure_valid()
-            raw_devices = await self.cloud.get_devices()
-        except GoveeAuthError as err:
-            raise ConfigEntryAuthFailed(str(err)) from err
-        except (GoveeApiError, aiohttp.ClientError, TimeoutError) as err:
-            raise UpdateFailed(str(err)) from err
+            try:
+                await self.auth.ensure_valid()
+                raw_devices = await self.cloud.get_devices()
+            except GoveeAuthError as err:
+                raise ConfigEntryAuthFailed(str(err)) from err
+            except (GoveeApiError, aiohttp.ClientError, TimeoutError) as err:
+                raise UpdateFailed(str(err)) from err
 
-        removed = self.fleet.prune(self.ignored_devices)
-        if removed:
-            _LOGGER.debug("Removed ignored devices from the fleet: %s", sorted(removed))
-        seen = self.fleet.reconcile(raw_devices, ignored=self.ignored_devices)
-        self.fleet.reconcile_seen(seen)
-
-        await self._async_poll_devices()
-        return self.fleet.by_id
+            self.fleet.refresh(raw_devices, ignored=self.ignored_devices)
+            await self._async_poll_devices()
+            return self.fleet.by_id
+        finally:
+            self._refreshing = False
 
     async def _async_poll_devices(self) -> None:
         now = time.monotonic()
-        if (
-            self.enable_lan
-            and self._lan is not None
-            and now - self._last_lan_scan >= self.lan_scan_interval
-        ):
+        if self.enable_lan and now - self._last_lan_scan >= self.lan_scan_interval:
             self._last_lan_scan = now
-            try:
-                await self._lan.async_scan()
-            except OSError as err:
-                _LOGGER.debug("LAN scan failed: %s", err)
+            await self.router.async_scan()
 
         for device in self.devices.values():
             try:
@@ -175,79 +179,41 @@ class GoveeCoordinator(DataUpdateCoordinator[GoveeData]):
             except (GoveeApiError, OSError) as err:
                 _LOGGER.debug("Status request failed for %s: %s", device.name, err)
 
-    async def _async_start_iot(self) -> None:
-        if self._iot_started:
-            return
-        if not self.auth.account_topic:
-            _LOGGER.warning("Govee did not return an account topic; skipping IoT transport")
-            return
-        try:
-            certificate = await self.cloud.get_iot_certificate()
-        except Exception as err:  # keep the LAN/polling paths alive
-            _LOGGER.warning("Unable to obtain the Govee IoT certificate: %s", err)
-            return
-        iot = GoveeIot(
-            account_id=self.auth.account_id or "",
-            client_id=self.auth.client_id,
-            account_topic=self.auth.account_topic or "",
-            cert_dir=self._cert_dir,
-            loop=self.hass.loop,
-            on_message=self._handle_iot_message,
-        )
-        try:
-            await iot.async_start(certificate)
-        except Exception as err:  # keep the LAN/polling paths alive
-            _LOGGER.warning("Unable to connect to Govee IoT: %s", err)
-            return
-        self._iot = iot
-        self._iot_started = True
-
-    async def _async_start_lan(self) -> None:
-        if self._lan_started:
-            return
-        lan = GoveeLan(self.hass.loop, self._handle_lan_message)
-        try:
-            await lan.async_start()
-        except Exception as err:  # keep cloud polling alive when LAN is unavailable
-            _LOGGER.warning("Unable to start Govee LAN discovery: %s", err)
-            return
-        self._lan = lan
-        self._lan_started = True
-
-    def _handle_iot_message(self, payload: dict[str, Any]) -> None:
-        device_id = str(payload.get("device") or "")
-        self._handle_inbound(StatusReport(device_id, payload))
-
-    def _handle_lan_message(
-        self, device_id: str, command: str, data: dict[str, Any], ip: str
-    ) -> None:
-        if command == "devStatus":
-            device = self.devices.get(device_id)
-            if device is not None:
-                device.observed_lan(ip, time.monotonic())
-            self._handle_inbound(StatusReport(device_id, data))
-        else:
-            self._handle_inbound(LanObservation(device_id, ip, time.monotonic()))
-
     def _handle_inbound(self, event: StatusReport | LanObservation) -> None:
-        device = self.devices.get(event.device_id)
+        """Apply one typed event reported by a transport."""
+        device = self.fleet.get(event.device_id)
         if device is None:
             return
         if isinstance(event, LanObservation):
-            device.observed_lan(event.ip, event.seen_at)
-            self.async_update_listeners()
+            self.fleet.observe_lan(event.device_id, event.ip, event.seen_at)
             return
         decoded = decode_message(device.profile, dict(event.payload))
         if decoded.online is None:
             decoded.online = True
-        self._apply_state(device, decoded)
+        self.fleet.apply_report(
+            event.device_id,
+            decoded,
+            ip=event.ip,
+            seen_at=event.seen_at,
+        )
+
+    def _handle_fleet_changed(self) -> None:
+        """Publish a fleet change to Home Assistant's entity listeners.
+
+        The refresh cycle publishes its own result once, so a change made
+        while reconciling must not notify a second time.
+        """
+        if self._refreshing:
+            return
+        self.async_update_listeners()
+
+    def _handle_lan_endpoint_lost(self, device_id: str) -> None:
+        """Forget a LAN endpoint the transport could not reach."""
+        self.fleet.mark_lan_failed(device_id)
 
     def _apply_state(self, device: GoveeDevice, state: DeviceState | Mapping[str, Any]) -> None:
-        """Merge a decoded or optimistic state into the device."""
-        if not isinstance(state, DeviceState):
-            state = DeviceState.from_mapping(state)
-        device.state.merge_from(state)
-        self.async_update_listeners()
+        """Merge a decoded or optimistic state into the device through the fleet."""
+        self.fleet.apply_state(device.device_id, state)
 
     async def async_send(
         self,

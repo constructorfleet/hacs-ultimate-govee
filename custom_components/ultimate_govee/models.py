@@ -84,17 +84,23 @@ class DeviceState:
             setattr(state, key, _coerce_value(key, value))
         return state
 
-    def merge_from(self, other: DeviceState) -> None:
+    def merge_from(self, other: DeviceState) -> bool:
         """Merge the fields set on ``other`` into this state.
 
         ``None`` marks a field as unreported for every field, so a partial
-        update leaves previously known values untouched.
+        update leaves previously known values untouched. Returns whether any
+        value changed.
         """
+        changed = False
         for field_info in fields(self):
             value = getattr(other, field_info.name)
             if value is None:
                 continue
-            setattr(self, field_info.name, _coerce_value(field_info.name, value))
+            coerced = _coerce_value(field_info.name, value)
+            if getattr(self, field_info.name) != coerced:
+                setattr(self, field_info.name, coerced)
+                changed = True
+        return changed
 
 
 def _coerce_value(key: str, value: Any) -> Any:
@@ -132,14 +138,3 @@ class GoveeDevice:
     def lan_reachable(self) -> bool:
         """Return whether the device has been seen on the LAN recently."""
         return self.lan_ip is not None
-
-    def observed_lan(self, ip: str, seen_at: float) -> None:
-        """Record that the device answered on the local network."""
-        self.lan_ip = ip
-        self.lan_last_seen = seen_at
-        self.state.online = True
-
-    def lan_failed(self) -> None:
-        """Forget a LAN endpoint that did not accept a command."""
-        self.lan_ip = None
-        self.lan_last_seen = 0.0
