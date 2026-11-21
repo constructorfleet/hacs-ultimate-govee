@@ -8,14 +8,31 @@ from homeassistant.components.number import (
     NumberMode,
 )
 from homeassistant.config_entries import ConfigEntry
-from homeassistant.const import UnitOfTemperature
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
 from .coordinator import GoveeCoordinator
 from .entity import GoveeEntity
-from .profiles import KIND_HEATER, KIND_HUMIDIFIER
+from .entity_plan import PLATFORM_NUMBER, EntitySpec, entities_for_platform
 from .protocol import commands
+
+
+def _govee_number(
+    coordinator: GoveeCoordinator,
+    device_id: str,
+    spec: EntitySpec,
+) -> GoveeNumber:
+    return GoveeNumber(
+        coordinator,
+        device_id,
+        spec.key,
+        spec.name or spec.key,
+        minimum=spec.minimum if spec.minimum is not None else 0.0,
+        maximum=spec.maximum if spec.maximum is not None else 0.0,
+        step=spec.step if spec.step is not None else 1.0,
+        device_class=spec.device_class,
+        unit=spec.unit,
+    )
 
 
 async def async_setup_entry(
@@ -27,32 +44,10 @@ async def async_setup_entry(
     coordinator: GoveeCoordinator = entry.runtime_data
     entities: list[GoveeNumber] = []
     for device in coordinator.devices.values():
-        if device.profile.kind == KIND_HEATER:
-            entities.append(
-                GoveeNumber(
-                    coordinator,
-                    device.device_id,
-                    "target_temperature",
-                    "Target temperature",
-                    minimum=5,
-                    maximum=30,
-                    step=0.5,
-                    device_class=NumberDeviceClass.TEMPERATURE,
-                    unit=UnitOfTemperature.CELSIUS,
-                )
-            )
-        if device.profile.kind == KIND_HUMIDIFIER and "night_light" in device.profile.features:
-            entities.append(
-                GoveeNumber(
-                    coordinator,
-                    device.device_id,
-                    "night_light_brightness",
-                    "Night light brightness",
-                    minimum=1,
-                    maximum=100,
-                    step=1,
-                )
-            )
+        entities.extend(
+            _govee_number(coordinator, device.device_id, spec)
+            for spec in entities_for_platform(device.profile, PLATFORM_NUMBER)
+        )
     async_add_entities(entities)
 
 

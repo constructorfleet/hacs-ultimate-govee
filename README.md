@@ -1,3 +1,17 @@
+<p align="center">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="custom_components/ultimate_govee/brand/dark_logo.png">
+    <img src="custom_components/ultimate_govee/brand/logo.png" alt="Ultimate Govee" width="480">
+  </picture>
+</p>
+
+<p align="center">
+  <a href="https://github.com/hacs/integration"><img alt="HACS" src="https://img.shields.io/badge/HACS-Custom-41BDF5.svg?style=flat-square"></a>
+  <img alt="Home Assistant" src="https://img.shields.io/badge/Home%20Assistant-2026.10%2B-41BDF5.svg?style=flat-square">
+  <a href="https://github.com/constructorfleet/hacs-ultimate-govee/releases"><img alt="Release" src="https://img.shields.io/github/v/release/constructorfleet/hacs-ultimate-govee?style=flat-square"></a>
+  <img alt="License" src="https://img.shields.io/github/license/constructorfleet/hacs-ultimate-govee?style=flat-square">
+</p>
+
 # Ultimate Govee
 
 A Home Assistant custom integration for Govee lights, switches, sensors, fans,

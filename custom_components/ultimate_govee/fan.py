@@ -18,15 +18,13 @@ from homeassistant.util.percentage import (
 
 from .coordinator import GoveeCoordinator
 from .entity import GoveeEntity
+from .entity_plan import PLATFORM_FAN, entities_for_platform
 from .profiles import (
-    KIND_CEILING_FAN,
     KIND_DEHUMIDIFIER,
     KIND_FAN,
     KIND_PURIFIER,
 )
 from .protocol import commands
-
-FAN_KINDS = {KIND_CEILING_FAN, KIND_DEHUMIDIFIER, KIND_FAN, KIND_PURIFIER}
 
 
 async def async_setup_entry(
@@ -37,17 +35,22 @@ async def async_setup_entry(
     """Set up fan entities."""
     coordinator: GoveeCoordinator = entry.runtime_data
     async_add_entities(
-        GoveeFan(coordinator, device.device_id)
+        GoveeFan(coordinator, device.device_id, spec.key)
         for device in coordinator.devices.values()
-        if device.profile.kind in FAN_KINDS
+        for spec in entities_for_platform(device.profile, PLATFORM_FAN)
     )
 
 
 class GoveeFan(GoveeEntity, FanEntity):
     """A fan, purifier or dehumidifier."""
 
-    def __init__(self, coordinator: GoveeCoordinator, device_id: str) -> None:
-        super().__init__(coordinator, device_id, "fan")
+    def __init__(
+        self,
+        coordinator: GoveeCoordinator,
+        device_id: str,
+        key: str = "fan",
+    ) -> None:
+        super().__init__(coordinator, device_id, key)
         profile = self.device.profile
         self._speeds = tuple(str(speed) for speed in range(1, profile.fan_speeds + 1))
         features = FanEntityFeature.SET_SPEED

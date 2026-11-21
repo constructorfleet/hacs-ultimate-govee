@@ -6,29 +6,17 @@ from dataclasses import dataclass
 from typing import Any
 
 from homeassistant.components.sensor import (
-    SensorDeviceClass,
     SensorEntity,
     SensorEntityDescription,
-    SensorStateClass,
 )
 from homeassistant.config_entries import ConfigEntry
-from homeassistant.const import (
-    PERCENTAGE,
-    UnitOfDensity,
-    UnitOfElectricCurrent,
-    UnitOfElectricPotential,
-    UnitOfPower,
-    UnitOfRatio,
-    UnitOfTemperature,
-)
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
 from .coordinator import GoveeCoordinator
 from .entity import GoveeEntity
-from .profiles import sensor_keys
+from .entity_plan import PLATFORM_SENSOR, EntitySpec, entities_for_platform
 
-AIR_QUALITY_OPTIONS = ["excellent", "good", "moderate", "poor"]
 AIR_QUALITY_MAP = {1: "excellent", 2: "good", 3: "moderate", 4: "poor"}
 
 
@@ -39,79 +27,17 @@ class GoveeSensorDescription(SensorEntityDescription):
     state_key: str
 
 
-SENSOR_DESCRIPTIONS: dict[str, GoveeSensorDescription] = {
-    "temperature": GoveeSensorDescription(
-        key="temperature",
-        state_key="temperature",
-        device_class=SensorDeviceClass.TEMPERATURE,
-        native_unit_of_measurement=UnitOfTemperature.CELSIUS,
-        state_class=SensorStateClass.MEASUREMENT,
-    ),
-    "humidity": GoveeSensorDescription(
-        key="humidity",
-        state_key="humidity",
-        device_class=SensorDeviceClass.HUMIDITY,
-        native_unit_of_measurement=PERCENTAGE,
-        state_class=SensorStateClass.MEASUREMENT,
-    ),
-    "battery": GoveeSensorDescription(
-        key="battery",
-        state_key="battery",
-        device_class=SensorDeviceClass.BATTERY,
-        native_unit_of_measurement=PERCENTAGE,
-        state_class=SensorStateClass.MEASUREMENT,
-    ),
-    "pm25": GoveeSensorDescription(
-        key="pm25",
-        state_key="pm25",
-        device_class=SensorDeviceClass.PM25,
-        native_unit_of_measurement=UnitOfDensity.MICROGRAMS_PER_CUBIC_METER,
-        state_class=SensorStateClass.MEASUREMENT,
-    ),
-    "co2": GoveeSensorDescription(
-        key="co2",
-        state_key="co2",
-        device_class=SensorDeviceClass.CO2,
-        native_unit_of_measurement=UnitOfRatio.PARTS_PER_MILLION,
-        state_class=SensorStateClass.MEASUREMENT,
-    ),
-    "air_quality": GoveeSensorDescription(
-        key="air_quality",
-        state_key="air_quality",
-        device_class=SensorDeviceClass.ENUM,
-        options=AIR_QUALITY_OPTIONS,
-        translation_key="air_quality",
-    ),
-    "filter_life": GoveeSensorDescription(
-        key="filter_life",
-        state_key="filter_life",
-        native_unit_of_measurement=PERCENTAGE,
-        state_class=SensorStateClass.MEASUREMENT,
-        icon="mdi:air-filter",
-        translation_key="filter_life",
-    ),
-    "voltage": GoveeSensorDescription(
-        key="voltage",
-        state_key="voltage",
-        device_class=SensorDeviceClass.VOLTAGE,
-        native_unit_of_measurement=UnitOfElectricPotential.VOLT,
-        state_class=SensorStateClass.MEASUREMENT,
-    ),
-    "current": GoveeSensorDescription(
-        key="current",
-        state_key="current",
-        device_class=SensorDeviceClass.CURRENT,
-        native_unit_of_measurement=UnitOfElectricCurrent.AMPERE,
-        state_class=SensorStateClass.MEASUREMENT,
-    ),
-    "power_usage": GoveeSensorDescription(
-        key="power_usage",
-        state_key="power_usage",
-        device_class=SensorDeviceClass.POWER,
-        native_unit_of_measurement=UnitOfPower.WATT,
-        state_class=SensorStateClass.MEASUREMENT,
-    ),
-}
+def _description(spec: EntitySpec) -> GoveeSensorDescription:
+    return GoveeSensorDescription(
+        key=spec.key,
+        state_key=spec.state_key or spec.key,
+        device_class=spec.device_class,
+        native_unit_of_measurement=spec.unit,
+        state_class=spec.state_class,
+        options=list(spec.options) if spec.options else None,
+        icon=spec.icon,
+        translation_key=spec.translation_key,
+    )
 
 
 async def async_setup_entry(
@@ -123,13 +49,9 @@ async def async_setup_entry(
     coordinator: GoveeCoordinator = entry.runtime_data
     entities: list[GoveeSensor] = []
     for device in coordinator.devices.values():
-        keys = list(sensor_keys(device.profile))
-        if device.sku == "H5086":
-            keys.extend(("voltage", "current", "power_usage"))
         entities.extend(
-            GoveeSensor(coordinator, device.device_id, SENSOR_DESCRIPTIONS[key])
-            for key in keys
-            if key in SENSOR_DESCRIPTIONS
+            GoveeSensor(coordinator, device.device_id, _description(spec), spec.name)
+            for spec in entities_for_platform(device.profile, PLATFORM_SENSOR)
         )
     async_add_entities(entities)
 
@@ -144,12 +66,13 @@ class GoveeSensor(GoveeEntity, SensorEntity):
         coordinator: GoveeCoordinator,
         device_id: str,
         description: GoveeSensorDescription,
+        name: str | None = None,
     ) -> None:
         super().__init__(coordinator, device_id, description.key)
         self.entity_description = description
         self._attr_translation_key = description.translation_key
         if description.translation_key is None:
-            self._attr_name = description.key.replace("_", " ").title()
+            self._attr_name = name or description.key.replace("_", " ").title()
 
     @property
     def native_value(self) -> Any:

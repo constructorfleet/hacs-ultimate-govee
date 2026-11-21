@@ -11,6 +11,8 @@ from pytest_homeassistant_custom_component.common import MockConfigEntry
 from custom_components.ultimate_govee import _async_remove_ignored_devices
 from custom_components.ultimate_govee.const import DOMAIN
 from custom_components.ultimate_govee.coordinator import GoveeCoordinator
+from custom_components.ultimate_govee.effects import EffectsLibrary
+from custom_components.ultimate_govee.fleet import Fleet
 from custom_components.ultimate_govee.models import DeviceState, GoveeDevice
 from custom_components.ultimate_govee.profiles import profile_for
 
@@ -132,18 +134,18 @@ async def test_all_platforms_create_entities(
     """Set up the integration and check that every platform added entities."""
 
     async def _setup(self: GoveeCoordinator) -> None:
-        self.devices = devices
+        self.fleet = Fleet(devices.values())
 
     async def _refresh(self: GoveeCoordinator) -> None:
-        self.devices = devices
-        self.data = devices
+        self.data = self.fleet.by_id
 
-    async def _effects(self: GoveeCoordinator, device: GoveeDevice) -> list[dict[str, Any]]:
-        return []
+    async def _load_effects(self: EffectsLibrary, device: GoveeDevice) -> None:
+        return None
 
     monkeypatch.setattr(GoveeCoordinator, "async_setup", _setup)
     monkeypatch.setattr(GoveeCoordinator, "async_config_entry_first_refresh", _refresh)
-    monkeypatch.setattr(GoveeCoordinator, "async_get_effects", _effects)
+    monkeypatch.setattr(EffectsLibrary, "async_load", _load_effects)
+    monkeypatch.setattr(EffectsLibrary, "effects", lambda self, device: ())
 
     entry = MockConfigEntry(
         domain=DOMAIN,

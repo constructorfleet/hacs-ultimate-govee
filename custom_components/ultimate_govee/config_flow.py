@@ -25,16 +25,11 @@ from .const import (
     CONF_LAN_SCAN_INTERVAL,
     CONF_PASSWORD,
     CONF_POLL_INTERVAL,
-    DEFAULT_ENABLE_EFFECTS,
-    DEFAULT_ENABLE_IOT,
-    DEFAULT_ENABLE_LAN,
-    DEFAULT_ENABLE_TAP_TO_RUNS,
-    DEFAULT_LAN_SCAN_INTERVAL,
-    DEFAULT_POLL_INTERVAL,
     DOMAIN,
     MAX_POLL_INTERVAL,
     MIN_POLL_INTERVAL,
 )
+from .options import GoveeOptions
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -146,11 +141,11 @@ class UltimateGoveeOptionsFlow(OptionsFlow):
     async def async_step_init(self, user_input: dict[str, Any] | None = None) -> FlowResult:
         """Show the options form."""
         if user_input is not None:
-            return self.async_create_entry(title="", data=user_input)
+            normalized = GoveeOptions.from_mapping(user_input).as_dict()
+            return self.async_create_entry(title="", data=normalized)
 
-        options = self.config_entry.options
-        ignored = options.get(CONF_IGNORED_DEVICES, [])
-        ignored = ignored if isinstance(ignored, list) else []
+        options = GoveeOptions.from_entry(self.config_entry)
+        ignored = sorted(options.ignored_devices)
         coordinator = getattr(self.config_entry, "runtime_data", None)
         devices = getattr(coordinator, "devices", {})
         device_options = [
@@ -178,23 +173,23 @@ class UltimateGoveeOptionsFlow(OptionsFlow):
                 ),
                 vol.Optional(
                     CONF_ENABLE_EFFECTS,
-                    default=options.get(CONF_ENABLE_EFFECTS, DEFAULT_ENABLE_EFFECTS),
+                    default=options.enable_effects,
                 ): bool,
                 vol.Optional(
                     CONF_ENABLE_TAP_TO_RUNS,
-                    default=options.get(CONF_ENABLE_TAP_TO_RUNS, DEFAULT_ENABLE_TAP_TO_RUNS),
+                    default=options.enable_tap_to_runs,
                 ): bool,
                 vol.Optional(
                     CONF_ENABLE_LAN,
-                    default=options.get(CONF_ENABLE_LAN, DEFAULT_ENABLE_LAN),
+                    default=options.enable_lan,
                 ): bool,
                 vol.Optional(
                     CONF_ENABLE_IOT,
-                    default=options.get(CONF_ENABLE_IOT, DEFAULT_ENABLE_IOT),
+                    default=options.enable_iot,
                 ): bool,
                 vol.Optional(
                     CONF_POLL_INTERVAL,
-                    default=options.get(CONF_POLL_INTERVAL, DEFAULT_POLL_INTERVAL),
+                    default=options.poll_interval,
                 ): selector.NumberSelector(
                     selector.NumberSelectorConfig(
                         min=MIN_POLL_INTERVAL,
@@ -205,7 +200,7 @@ class UltimateGoveeOptionsFlow(OptionsFlow):
                 ),
                 vol.Optional(
                     CONF_LAN_SCAN_INTERVAL,
-                    default=options.get(CONF_LAN_SCAN_INTERVAL, DEFAULT_LAN_SCAN_INTERVAL),
+                    default=options.lan_scan_interval,
                 ): selector.NumberSelector(
                     selector.NumberSelectorConfig(
                         min=MIN_POLL_INTERVAL,
