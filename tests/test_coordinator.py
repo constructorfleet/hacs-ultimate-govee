@@ -16,6 +16,7 @@ from custom_components.ultimate_govee.coordinator import GoveeCoordinator
 from custom_components.ultimate_govee.fleet import Fleet
 from custom_components.ultimate_govee.models import DeviceState, GoveeDevice
 from custom_components.ultimate_govee.profiles import profile_for
+from custom_components.ultimate_govee.protocol import commands
 from custom_components.ultimate_govee.protocol.codec import build_frame, bytes_to_base64
 from custom_components.ultimate_govee.tap_to_runs import TapAction, TapToRun
 from custom_components.ultimate_govee.transport import StatusReport, TransportKind
@@ -213,6 +214,27 @@ async def test_coordinator_lifecycle_delegates_to_the_router(hass: Any, tmp_path
     assert calls == ["start", "stop"]
 
 
+async def test_poll_ticks_the_router_without_a_lan_gate(hass: Any, tmp_path: Path) -> None:
+    """Scanning is the router's cadence, even when LAN is disabled."""
+    coordinator, _ = _coordinator_with_device(hass, tmp_path)
+    assert coordinator.govee_options.enable_lan is False
+    calls: list[str] = []
+
+    class RouterStub:
+        async def async_scan(self) -> None:
+            calls.append("scan")
+
+        async def request_status(self, _device: GoveeDevice) -> TransportKind:
+            calls.append("status")
+            return TransportKind.CLOUD_MQTT
+
+    coordinator.router = RouterStub()  # type: ignore[assignment]
+
+    await coordinator._async_poll_devices()
+
+    assert calls == ["scan", "status"]
+
+
 async def test_fleet_changes_notify_coordinator_listeners(hass: Any, tmp_path: Path) -> None:
     """A fleet observation is the single path to entity listeners."""
     coordinator, device = _coordinator_with_device(hass, tmp_path)
@@ -254,3 +276,37 @@ async def test_refresh_publishes_one_listener_notification(hass: Any, tmp_path: 
 
     coordinator.async_update_listeners.assert_not_called()
     assert set(coordinator.devices) == {"device-1", "device-2"}
+
+
+async def test_refresh_publishes_exactly_once_end_to_end(hass: Any, tmp_path: Path) -> None:
+    """One refresh reaches entity listeners once, through the coordinator."""
+    coordinator, _ = _coordinator_with_device(hass, tmp_path)
+    coordinator.auth.ensure_valid = AsyncMock()  # type: ignore[method-assign]
+    coordinator.cloud.get_devices = AsyncMock(  # type: ignore[method-assign]
+        return_value=[_raw("device-1", "One"), _raw("device-2", "Two")]
+    )
+    coordinator.async_update_listeners = Mock()  # type: ignore[method-assign]
+
+    await coordinator.async_refresh()
+
+    assert coordinator.async_update_listeners.call_count == 1
+    assert set(coordinator.devices) == {"device-1", "device-2"}
+
+
+async def test_optimistic_send_is_one_listener_notification(hass: Any, tmp_path: Path) -> None:
+    """A sent command and its optimistic state commit as one Fleet change."""
+    coordinator, device = _coordinator_with_device(hass, tmp_path)
+    coordinator.router.send = AsyncMock()  # type: ignore[method-assign]
+    calls: list[int] = []
+    coordinator.async_update_listeners = Mock(  # type: ignore[method-assign]
+        side_effect=lambda: calls.append(1)
+    )
+
+    await coordinator.async_send(
+        device,
+        commands.power(device.profile, True),
+        optimistic={"power": True},
+    )
+
+    assert calls == [1]
+    assert device.state.power is True

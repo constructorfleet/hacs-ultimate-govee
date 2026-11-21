@@ -12,12 +12,13 @@ from custom_components.ultimate_govee.profiles import (
     KIND_LIGHT,
     KIND_PURIFIER,
     KIND_SWITCH,
-    PRIORITY_FALLBACK,
-    PRIORITY_PREFIX,
-    PROFILE_REGISTRY,
+    SKU_ROWS,
+    SkuGroup,
+    _build_sku_rows,
     binary_sensor_keys,
     profile_for,
     sensor_keys,
+    sku_row,
 )
 
 
@@ -45,7 +46,7 @@ def test_cloud_capabilities_strip_unsupported_light_features() -> None:
     profile = profile_for("H6001", ["turn", "brightness"])
 
     assert profile.kind == KIND_LIGHT
-    assert profile.family == "light_prefix"
+    assert profile.evidence == "light_prefix"
     assert not profile.supports_color
     assert not profile.supports_color_temp
     assert profile.supports_brightness
@@ -54,7 +55,7 @@ def test_cloud_capabilities_strip_unsupported_light_features() -> None:
 def test_light_kelvin_range_override() -> None:
     profile = profile_for("H6001", properties={"colorTem": {"range": {"min": 2700, "max": 6500}}})
 
-    assert profile.family == "light_prefix"
+    assert profile.evidence == "light_prefix"
     assert profile.min_kelvin == 2700
     assert profile.max_kelvin == 6500
 
@@ -96,7 +97,7 @@ def test_unknown_sku_falls_back_to_a_switch() -> None:
 
     assert profile.kind == KIND_SWITCH
     assert profile.features == frozenset({FEATURE_POWER})
-    assert profile.family == "generic"
+    assert profile.evidence == "generic"
 
 
 def test_sensor_keys() -> None:
@@ -107,30 +108,60 @@ def test_binary_sensor_keys() -> None:
     assert binary_sensor_keys(profile_for("H5054")) == ("leak",)
 
 
-def test_registry_priorities_are_explicit_and_unique() -> None:
-    priorities = [spec.priority for spec in PROFILE_REGISTRY]
-    names = [spec.name for spec in PROFILE_REGISTRY]
-
-    assert priorities == sorted(priorities)
-    assert len(set(priorities)) == len(priorities)
-    assert len(set(names)) == len(names)
-    assert names[-2:] == ["light_prefix", "generic"]
-    assert priorities[-2] == PRIORITY_PREFIX
-    assert priorities[-1] == PRIORITY_FALLBACK
+def test_every_exact_sku_row_is_the_profile_and_dialect_index() -> None:
+    assert SKU_ROWS
+    for sku, row in SKU_ROWS.items():
+        profile = profile_for(sku)
+        assert profile.evidence == row.evidence
+        assert profile.dialect == row.dialect
+        assert profile.model_name == sku
+        assert row.source
 
 
-def test_exact_model_rules_precede_prefix_rules() -> None:
-    priorities = {spec.name: spec.priority for spec in PROFILE_REGISTRY}
+def test_sku_row_lookup_normalizes_the_model_code() -> None:
+    row = sku_row(" h7142 ")
 
-    assert priorities["ceiling_fan"] < priorities["light_prefix"]
-    assert priorities["tv"] < priorities["light_prefix"]
-    assert priorities["switch_single"] < priorities["light_prefix"]
-    # Two exact-model lists overlap, so their relative order is explicit too.
-    assert priorities["ceiling_fan"] < priorities["fan"]
+    assert row is not None
+    assert row.sku == "H7142"
+    assert row.dialect == "humidifier_h7142"
+
+
+def test_conflicting_exact_rows_fail_at_construction() -> None:
+    def _unused_factory(
+        sku: str,
+        support_cmds: list[str] | None = None,
+        properties: dict[str, object] | None = None,
+    ) -> object:
+        raise AssertionError(f"{sku} was not expected to build: {support_cmds} {properties}")
+
+    first = SkuGroup("first", frozenset({"H0001"}), _unused_factory, "generic", "first", "test")
+    second = SkuGroup("second", frozenset({"H0001"}), _unused_factory, "generic", "second", "test")
+
+    with pytest.raises(ValueError, match="H0001"):
+        _build_sku_rows((first, second))
+
+
+def test_unknown_sku_rows_do_not_silently_become_an_exact_row() -> None:
+    assert sku_row("H9999") is None
+    assert sku_row("H6001") is None
+    assert profile_for("H9999").evidence == "generic"
+    assert profile_for("H6001").evidence == "light_prefix"
+
+
+def test_exact_sku_rows_precede_prefix_and_fallback_rules() -> None:
+    # H1310/R1310 look like H1/R1 lights but have exact ceiling-fan rows.
+    assert profile_for("H1310").evidence == "ceiling_fan"
+    assert profile_for("R1310").evidence == "ceiling_fan"
+    assert profile_for("H1310").kind == KIND_CEILING_FAN
+    # The H116x set is a TV set despite the H1 prefix.
+    assert {profile_for(sku).evidence for sku in ("H1161", "H1163", "H1167", "H1168")} == {"tv"}
+    # H7014 is a switch despite the H70 prefix.
+    assert profile_for("H7014").evidence == "switch_single"
+    assert profile_for("H7014").kind == KIND_SWITCH
 
 
 @pytest.mark.parametrize(
-    ("sku", "family", "kind"),
+    ("sku", "evidence", "kind"),
     [
         ("H1310", "ceiling_fan", KIND_CEILING_FAN),
         ("R1310", "ceiling_fan", KIND_CEILING_FAN),
@@ -142,15 +173,17 @@ def test_exact_model_rules_precede_prefix_rules() -> None:
         ("H7014", "switch_single", KIND_SWITCH),
     ],
 )
-def test_known_prefix_collisions_resolve_to_exact_models(sku: str, family: str, kind: str) -> None:
+def test_known_prefix_collisions_resolve_to_exact_models(
+    sku: str, evidence: str, kind: str
+) -> None:
     profile = profile_for(sku)
 
-    assert profile.family == family
+    assert profile.evidence == evidence
     assert profile.kind == kind
 
 
 @pytest.mark.parametrize(
-    ("sku", "family", "kind", "fan_speeds", "gang_count", "modes", "ice_sizes", "features"),
+    ("sku", "evidence", "kind", "fan_speeds", "gang_count", "modes", "ice_sizes", "features"),
     [
         (
             "H1310",
@@ -369,7 +402,7 @@ def test_known_prefix_collisions_resolve_to_exact_models(sku: str, family: str, 
 def test_representative_profiles_are_unchanged(
     *,
     sku: str,
-    family: str,
+    evidence: str,
     kind: str,
     fan_speeds: int,
     gang_count: int,
@@ -379,7 +412,7 @@ def test_representative_profiles_are_unchanged(
 ) -> None:
     profile = profile_for(sku)
 
-    assert profile.family == family
+    assert profile.evidence == evidence
     assert profile.kind == kind
     assert profile.fan_speeds == fan_speeds
     assert profile.gang_count == gang_count

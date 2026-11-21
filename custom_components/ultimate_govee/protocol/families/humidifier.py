@@ -22,7 +22,11 @@ from ..command import (
     frames_command,
 )
 from .base import FamilyDialect
-from .common import apply_humidity_reading, apply_night_light
+from .common import (
+    apply_humidity_reading,
+    apply_night_light,
+    decode_humidifier_register_05,
+)
 from .generic import HUMIDIFIER_MODE_AUTO, HUMIDIFIER_MODES, frame_command
 
 if TYPE_CHECKING:
@@ -60,7 +64,7 @@ class HumidifierDialect(FamilyDialect):
         result: dict[str, Any],
     ) -> bool:
         if register == 0x05 and payload:
-            _decode_register_05(profile, payload, result)
+            decode_humidifier_register_05(profile, payload, result)
             return True
         if register == 0x10 and len(payload) >= 4:
             apply_humidity_reading(payload, result)
@@ -119,25 +123,3 @@ class H7142Dialect(HumidifierDialect):
             max(0, min(255, int(value))) for value in parameters.get("rgb", (255, 255, 255))
         )
         return frames_command([build_frame_b64(0x1B, [1, level, red, green, blue])])
-
-
-def _decode_register_05(profile: DeviceProfile, payload: bytes, result: dict[str, Any]) -> None:
-    """Decode the humidifier mode/speed report registers."""
-    sub = payload[0]
-    if sub == 0x00 and len(payload) >= 2:
-        result["mode"] = {1: "manual", 2: "program", 3: "auto"}.get(payload[1])
-        if payload[1] == 0x03 and len(payload) > 2:
-            result["target_humidity"] = payload[2]
-    elif sub == 0x01 and len(payload) >= 2:
-        result["mode"] = "manual"
-        result["fan_speed"] = payload[1]
-        result["percentage"] = _gear_percentage(payload[1], profile.fan_speeds or 9)
-    elif sub == 0x02:
-        result["mode"] = "program"
-    elif sub == 0x03 and len(payload) >= 2:
-        result["mode"] = "auto"
-        result["target_humidity"] = payload[1]
-
-
-def _gear_percentage(gear: int, fan_speeds: int) -> int:
-    return max(0, min(100, round(gear * 100 / fan_speeds)))

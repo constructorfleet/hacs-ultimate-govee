@@ -95,6 +95,16 @@ FAN_OPERATION_SPEED: Final = "speed"
 FAN_OPERATION_MODE: Final = "mode"
 FAN_OPERATION_OSCILLATE: Final = "oscillate"
 
+LIGHT_OPERATION_POWER: Final = "power"
+LIGHT_OPERATION_BRIGHTNESS: Final = "brightness"
+LIGHT_OPERATION_COLOR: Final = "color"
+LIGHT_OPERATION_COLOR_TEMP: Final = "color_temp"
+LIGHT_OPERATION_EFFECT: Final = "effect"
+
+HUMIDIFIER_OPERATION_POWER: Final = "power"
+HUMIDIFIER_OPERATION_TARGET: Final = "target"
+HUMIDIFIER_OPERATION_MODE: Final = "mode"
+
 
 @dataclass(frozen=True, slots=True)
 class EntitySpec:
@@ -439,6 +449,66 @@ def _fan_control(ctx: ControlContext) -> ControlResult:
     raise ValueError(f"Unknown fan operation {ctx.operation!r}")
 
 
+def _light_control(ctx: ControlContext) -> ControlResult:
+    """Build the command and optimistic state for one light operation."""
+    profile = ctx.profile
+    if ctx.operation == LIGHT_OPERATION_POWER:
+        on = bool(ctx.value)
+        return ControlResult(commands.power(profile, on), {"power": on})
+    if ctx.operation == LIGHT_OPERATION_BRIGHTNESS:
+        brightness = round(int(ctx.value) * 100 / 255)
+        return ControlResult(
+            commands.brightness(profile, brightness),
+            {"brightness": brightness},
+        )
+    if ctx.operation == LIGHT_OPERATION_COLOR:
+        red, green, blue = ctx.value
+        return ControlResult(
+            commands.color(red, green, blue),
+            {"color": (red, green, blue), "color_temp": None},
+        )
+    if ctx.operation == LIGHT_OPERATION_COLOR_TEMP:
+        kelvin = int(ctx.value)
+        return ControlResult(commands.color_temp(kelvin), {"color_temp": kelvin})
+    if ctx.operation == LIGHT_OPERATION_EFFECT:
+        name = str(ctx.value)
+        return ControlResult(
+            commands.effect(list(ctx.parameters.get("frames", ()))),
+            {"effect": name, "power": True},
+        )
+    raise ValueError(f"Unknown light operation {ctx.operation!r}")
+
+
+def _humidifier_control(ctx: ControlContext) -> ControlResult:
+    """Build the command and optimistic state for one humidifier operation."""
+    profile = ctx.profile
+    if ctx.operation == HUMIDIFIER_OPERATION_POWER:
+        on = bool(ctx.value)
+        return ControlResult(commands.power(profile, on), {"power": on})
+    if ctx.operation == HUMIDIFIER_OPERATION_TARGET:
+        humidity = int(ctx.value)
+        return ControlResult(
+            commands.humidifier_target(profile, humidity),
+            {"target_humidity": humidity, "mode": "auto"},
+        )
+    if ctx.operation == HUMIDIFIER_OPERATION_MODE:
+        mode = str(ctx.value)
+        if mode == "auto":
+            target = ctx.state.target_humidity or 50
+            return ControlResult(
+                commands.humidifier_target(profile, target),
+                {"mode": "auto", "power": True},
+            )
+        if mode == "manual":
+            level = ctx.state.fan_speed or 5
+            return ControlResult(
+                commands.mist_level(profile, level),
+                {"mode": "manual", "power": True},
+            )
+        return ControlResult(commands.humidifier_mode(profile, mode), {"mode": mode})
+    raise ValueError(f"Unknown humidifier operation {ctx.operation!r}")
+
+
 def _binary_sensor_specs(profile: DeviceProfile) -> tuple[EntitySpec, ...]:
     return tuple(
         _BINARY_SENSOR_SPECS[key]
@@ -455,13 +525,19 @@ def _fan_specs(profile: DeviceProfile) -> tuple[EntitySpec, ...]:
 
 def _humidifier_specs(profile: DeviceProfile) -> tuple[EntitySpec, ...]:
     if profile.kind == KIND_HUMIDIFIER:
-        return (EntitySpec(platform=PLATFORM_HUMIDIFIER, key="humidifier"),)
+        return (
+            EntitySpec(
+                platform=PLATFORM_HUMIDIFIER,
+                key="humidifier",
+                control=_humidifier_control,
+            ),
+        )
     return ()
 
 
 def _light_specs(profile: DeviceProfile) -> tuple[EntitySpec, ...]:
     if profile.kind == KIND_LIGHT:
-        return (EntitySpec(platform=PLATFORM_LIGHT, key="light"),)
+        return (EntitySpec(platform=PLATFORM_LIGHT, key="light", control=_light_control),)
     return ()
 
 
@@ -595,6 +671,14 @@ __all__ = [
     "FAN_OPERATION_OSCILLATE",
     "FAN_OPERATION_POWER",
     "FAN_OPERATION_SPEED",
+    "HUMIDIFIER_OPERATION_MODE",
+    "HUMIDIFIER_OPERATION_POWER",
+    "HUMIDIFIER_OPERATION_TARGET",
+    "LIGHT_OPERATION_BRIGHTNESS",
+    "LIGHT_OPERATION_COLOR",
+    "LIGHT_OPERATION_COLOR_TEMP",
+    "LIGHT_OPERATION_EFFECT",
+    "LIGHT_OPERATION_POWER",
     "PLATFORM_BINARY_SENSOR",
     "PLATFORM_FAN",
     "PLATFORM_HUMIDIFIER",

@@ -228,9 +228,9 @@ def test_plan_preserves_entity_counts_for_the_test_fleet(sku: str, count: int) -
 
 def test_control_platform_specs_all_carry_a_builder() -> None:
     """Every controllable spec reads from the plan's control seam."""
-    for sku in ("H5080", "H5082", "H7100", "H7120", "H7130", "H7142", "H7172"):
+    for sku in ("H6001", "H5080", "H5082", "H7100", "H7120", "H7130", "H7142", "H7172"):
         profile = profile_for(sku)
-        for platform in ("fan", "number", "select", "switch"):
+        for platform in ("fan", "humidifier", "light", "number", "select", "switch"):
             for spec in entities_for_platform(profile, platform):
                 assert spec.control is not None, (sku, platform, spec.key)
 
@@ -349,3 +349,70 @@ def test_purifier_and_dehumidifier_fan_controls_match_builders() -> None:
     dehumidifier_spec = _spec("H7150", "fan", "fan")
     mode = dehumidifier_spec.control(ControlContext(dehumidifier, state, "auto", operation="mode"))
     assert mode.command == commands.dehumidifier_mode(dehumidifier, "auto")
+
+
+def test_light_controls_match_light_builders() -> None:
+    profile = profile_for("H6001")
+    spec = _spec("H6001", "light", "light")
+    state = DeviceState(power=False, brightness=50)
+
+    power = spec.control(ControlContext(profile, state, True, operation="power"))
+    assert power.command == commands.power(profile, True)
+    assert power.optimistic == {"power": True}
+
+    brightness = spec.control(ControlContext(profile, state, 128, operation="brightness"))
+    assert brightness.command == commands.brightness(profile, 50)
+    assert brightness.optimistic == {"brightness": 50}
+
+    color = spec.control(ControlContext(profile, state, (10, 20, 30), operation="color"))
+    assert color.command == commands.color(10, 20, 30)
+    assert color.optimistic == {"color": (10, 20, 30), "color_temp": None}
+
+    color_temp = spec.control(ControlContext(profile, state, 4000, operation="color_temp"))
+    assert color_temp.command == commands.color_temp(4000)
+    assert color_temp.optimistic == {"color_temp": 4000}
+
+    frames = ((0xAA, 1, 2),)
+    effect = spec.control(
+        ControlContext(profile, state, "Sunrise", operation="effect", parameters={"frames": frames})
+    )
+    assert effect.command == commands.effect(list(frames))
+    assert effect.optimistic == {"effect": "Sunrise", "power": True}
+
+
+def test_humidifier_controls_match_humidifier_builders() -> None:
+    profile = profile_for("H7142")
+    spec = _spec("H7142", "humidifier", "humidifier")
+    state = DeviceState(power=False, target_humidity=60, fan_speed=7)
+
+    power = spec.control(ControlContext(profile, state, True, operation="power"))
+    assert power.command == commands.power(profile, True)
+    assert power.optimistic == {"power": True}
+
+    target = spec.control(ControlContext(profile, state, 55, operation="target"))
+    assert target.command == commands.humidifier_target(profile, 55)
+    assert target.optimistic == {"target_humidity": 55, "mode": "auto"}
+
+    auto = spec.control(ControlContext(profile, state, "auto", operation="mode"))
+    assert auto.command == commands.humidifier_target(profile, 60)
+    assert auto.optimistic == {"mode": "auto", "power": True}
+
+    manual = spec.control(ControlContext(profile, state, "manual", operation="mode"))
+    assert manual.command == commands.mist_level(profile, 7)
+    assert manual.optimistic == {"mode": "manual", "power": True}
+
+    program = spec.control(ControlContext(profile, state, "program", operation="mode"))
+    assert program.command == commands.humidifier_mode(profile, "program")
+    assert program.optimistic == {"mode": "program"}
+
+
+def test_humidifier_mode_defaults_match_the_entity_contract() -> None:
+    profile = profile_for("H7142")
+    spec = _spec("H7142", "humidifier", "humidifier")
+    state = DeviceState()
+
+    auto = spec.control(ControlContext(profile, state, "auto", operation="mode"))
+    assert auto.command == commands.humidifier_target(profile, 50)
+
+    manual = spec.control(ControlContext(profile, state, "manual", operation="mode"))
+    assert manual.command == commands.mist_level(profile, 5)

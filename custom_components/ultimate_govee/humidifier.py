@@ -14,12 +14,20 @@ from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
 from .coordinator import GoveeCoordinator
 from .entity import GoveeEntity
-from .entity_plan import PLATFORM_HUMIDIFIER, entities_for_platform
+from .entity_plan import (
+    HUMIDIFIER_OPERATION_MODE,
+    HUMIDIFIER_OPERATION_POWER,
+    HUMIDIFIER_OPERATION_TARGET,
+    PLATFORM_HUMIDIFIER,
+    ControlContext,
+    ControlResult,
+    EntitySpec,
+    entities_for_platform,
+)
 from .profiles import (
     FEATURE_MODE,
     FEATURE_TARGET_HUMIDITY,
 )
-from .protocol import commands
 
 
 async def async_setup_entry(
@@ -30,7 +38,7 @@ async def async_setup_entry(
     """Set up humidifier entities."""
     coordinator: GoveeCoordinator = entry.runtime_data
     async_add_entities(
-        GoveeHumidifier(coordinator, device.device_id, spec.key)
+        GoveeHumidifier(coordinator, device.device_id, spec)
         for device in coordinator.devices.values()
         for spec in entities_for_platform(device.profile, PLATFORM_HUMIDIFIER)
     )
@@ -46,9 +54,10 @@ class GoveeHumidifier(GoveeEntity, HumidifierEntity):
         self,
         coordinator: GoveeCoordinator,
         device_id: str,
-        key: str = "humidifier",
+        spec: EntitySpec,
     ) -> None:
-        super().__init__(coordinator, device_id, key)
+        super().__init__(coordinator, device_id, spec.key)
+        self._spec = spec
         profile = self.device.profile
         features = HumidifierEntityFeature(0)
         if FEATURE_MODE in profile.features and profile.modes:
@@ -78,41 +87,36 @@ class GoveeHumidifier(GoveeEntity, HumidifierEntity):
 
     async def async_turn_on(self, **kwargs: Any) -> None:
         """Turn the humidifier on."""
-        await self._send(commands.power(self.device.profile, True), {"power": True})
+        await self._async_send(self._control(HUMIDIFIER_OPERATION_POWER, True))
 
     async def async_turn_off(self, **kwargs: Any) -> None:
         """Turn the humidifier off."""
-        await self._send(commands.power(self.device.profile, False), {"power": False})
+        await self._async_send(self._control(HUMIDIFIER_OPERATION_POWER, False))
 
     async def async_set_humidity(self, humidity: int) -> None:
         """Set the target humidity."""
         if FEATURE_TARGET_HUMIDITY not in self.device.profile.features:
             return
-        await self._send(
-            commands.humidifier_target(self.device.profile, humidity),
-            {"target_humidity": humidity, "mode": "auto"},
-        )
+        await self._async_send(self._control(HUMIDIFIER_OPERATION_TARGET, humidity))
 
     async def async_set_mode(self, mode: str) -> None:
         """Select a work mode."""
         if mode not in self.device.profile.modes:
             return
-        if mode == "auto":
-            await self._send(
-                commands.humidifier_target(
-                    self.device.profile, self.device.state.target_humidity or 50
-                ),
-                {"mode": "auto", "power": True},
+        await self._async_send(self._control(HUMIDIFIER_OPERATION_MODE, mode))
+
+    def _control(self, operation: str, value: Any = None, **parameters: Any) -> ControlResult:
+        if self._spec.control is None:
+            raise ValueError("The humidifier plan has no control")
+        return self._spec.control(
+            ControlContext(
+                self.device.profile,
+                self.device.state,
+                value,
+                operation=operation,
+                parameters=parameters,
             )
-            return
-        if mode == "manual":
-            level = self.device.state.fan_speed or 5
-            await self._send(
-                commands.mist_level(self.device.profile, level),
-                {"mode": "manual", "power": True},
-            )
-            return
-        await self._send(
-            commands.humidifier_mode(self.device.profile, mode),
-            {"mode": mode},
         )
+
+    async def _async_send(self, result: ControlResult) -> None:
+        await self._send(result.command, dict(result.optimistic))

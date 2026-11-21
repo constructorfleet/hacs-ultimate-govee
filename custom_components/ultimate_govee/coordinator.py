@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import logging
-import time
 from collections.abc import Mapping
 from datetime import timedelta
 from pathlib import Path
@@ -36,14 +35,11 @@ from .protocol.command import ACTION_CLOUD, Command
 from .protocol.state import decode_message
 from .tap_to_runs import TapAction, TapToRun, parse_tap_to_runs
 from .transport import (
-    BleBroadcastTransport,
-    BleGattTransport,
-    CloudMqttTransport,
     CommandRouter,
     LanObservation,
-    LanUdpTransport,
-    LocalMqttTransport,
     StatusReport,
+    TransportContext,
+    TransportStatus,
 )
 
 _LOGGER = logging.getLogger(__name__)
@@ -72,12 +68,9 @@ class GoveeCoordinator(DataUpdateCoordinator[GoveeData]):
             update_interval=timedelta(seconds=self.poll_interval),
             config_entry=entry,
         )
-        self.enable_lan = self.govee_options.enable_lan
-        self.enable_iot = self.govee_options.enable_iot
         self.enable_effects = self.govee_options.enable_effects
         self.enable_tap_to_runs = self.govee_options.enable_tap_to_runs
         self.ignored_devices = set(self.govee_options.ignored_devices)
-        self.lan_scan_interval = self.govee_options.lan_scan_interval
         data = entry.data
         self.auth = GoveeAuth(
             session,
@@ -95,30 +88,19 @@ class GoveeCoordinator(DataUpdateCoordinator[GoveeData]):
         self._fleet.add_listener(self._handle_fleet_changed)
         self.effects_library = EffectsLibrary(self.cloud, enabled=self.enable_effects)
         self.tap_to_runs: list[TapToRun] | None = None
-        self.router = CommandRouter(
-            (
-                BleGattTransport(self.hass, on_report=self._handle_inbound),
-                BleBroadcastTransport(),
-                LanUdpTransport(
-                    self.hass.loop,
-                    enabled=self.enable_lan,
-                    on_event=self._handle_inbound,
-                    on_endpoint_lost=self._handle_lan_endpoint_lost,
-                ),
-                LocalMqttTransport(),
-                CloudMqttTransport(
-                    enabled=self.enable_iot,
-                    account_id=self.auth.account_id or "",
-                    client_id=self.auth.client_id or "",
-                    account_topic=self.auth.account_topic or "",
-                    cert_dir=cert_dir,
-                    loop=self.hass.loop,
-                    certificate=self.cloud.get_iot_certificate,
-                    on_event=self._handle_inbound,
-                ),
-            )
+        self.router = CommandRouter.from_options(
+            self.govee_options,
+            TransportContext(
+                hass=self.hass,
+                account_id=self.auth.account_id or "",
+                client_id=self.auth.client_id or "",
+                account_topic=self.auth.account_topic or "",
+                cert_dir=cert_dir,
+                certificate=self.cloud.get_iot_certificate,
+                on_event=self._handle_inbound,
+                on_endpoint_lost=self._handle_lan_endpoint_lost,
+            ),
         )
-        self._last_lan_scan = 0.0
         self._refreshing = False
 
     @property
@@ -168,10 +150,7 @@ class GoveeCoordinator(DataUpdateCoordinator[GoveeData]):
             self._refreshing = False
 
     async def _async_poll_devices(self) -> None:
-        now = time.monotonic()
-        if self.enable_lan and now - self._last_lan_scan >= self.lan_scan_interval:
-            self._last_lan_scan = now
-            await self.router.async_scan()
+        await self.router.async_scan()
 
         for device in self.devices.values():
             try:
@@ -227,8 +206,12 @@ class GoveeCoordinator(DataUpdateCoordinator[GoveeData]):
         if optimistic:
             self._apply_state(device, optimistic)
 
-    def transport_status(self) -> dict[str, Any]:
-        """Return the status of every configured transport."""
+    def transport_status(self) -> dict[str, dict[str, Any]]:
+        """Return every configured transport's status as diagnostics JSON."""
+        return self.router.status_dict()
+
+    def transport_statuses(self) -> dict[str, TransportStatus]:
+        """Return every configured transport's typed status record."""
         return self.router.status()
 
     async def async_get_tap_to_runs(self) -> list[TapToRun]:

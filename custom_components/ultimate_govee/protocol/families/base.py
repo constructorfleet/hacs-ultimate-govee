@@ -45,3 +45,16 @@ class FamilyDialect:
     ) -> bool:
         """Decode a register this dialect owns and return whether it did."""
         return False
+
+    def decode_raw(
+        self,
+        profile: DeviceProfile,
+        frame: bytes,
+        result: dict[str, Any],
+    ) -> bool:
+        """Decode a raw frame whose layout is not an ``AA/33/3A`` register.
+
+        Only dialects that own a whole-frame report (for example a gateway
+        frame or a heuristic sensor frame) override this.
+        """
+        return False

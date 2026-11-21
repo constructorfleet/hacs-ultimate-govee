@@ -17,6 +17,7 @@ from .const import (
     CONF_REFRESH_TOKEN,
 )
 from .coordinator import GoveeCoordinator
+from .transport import TransportKind
 
 REDACTED_KEYS = {
     CONF_ACCESS_TOKEN,
@@ -42,17 +43,19 @@ async def async_get_config_entry_diagnostics(
 ) -> dict[str, Any]:
     """Return diagnostics for a config entry."""
     coordinator: GoveeCoordinator = entry.runtime_data
-    transports = coordinator.transport_status()
+    statuses = coordinator.transport_statuses()
+    iot = statuses.get(TransportKind.CLOUD_MQTT.value)
+    lan = statuses.get(TransportKind.LAN_UDP.value)
     return {
         "data": _redact(dict(entry.data)),
         "options": coordinator.govee_options.as_dict(),
-        "transports": transports,
+        "transports": {kind: record.as_dict() for kind, record in statuses.items()},
         "iot": {
-            "enabled": coordinator.enable_iot,
-            "connected": transports["cloud_mqtt"]["connected"],
+            "enabled": bool(iot and iot.enabled),
+            "connected": bool(iot and iot.connected),
         },
         "lan": {
-            "enabled": coordinator.enable_lan,
+            "enabled": bool(lan and lan.enabled),
         },
         "devices": [
             _redact(
@@ -67,6 +70,7 @@ async def async_get_config_entry_diagnostics(
                         "features": sorted(device.profile.features),
                         "model_name": device.profile.model_name,
                         "dialect": device.profile.dialect,
+                        "evidence": device.profile.evidence,
                     },
                     "lan_ip": device.lan_ip,
                     "ble_address": device.ble_address,

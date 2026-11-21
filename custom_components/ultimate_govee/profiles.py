@@ -81,11 +81,11 @@ class DeviceProfile:
     model_name: str = ""
     ice_sizes: tuple[str, ...] = ()
     modes: tuple[str, ...] = ()
-    # Evidence label for the registry rule that selected this profile. It is
-    # not a taxonomy; see the note above PROFILE_REGISTRY.
-    family: str = "generic"
+    # Evidence label for the registry row that selected this profile. It is
+    # not a taxonomy; see the note above SKU_ROWS.
+    evidence: str = "generic"
     # Name of the family dialect that owns this SKU's register frames. The
-    # assignment comes from SKU_DIALECTS below, never from kind or prefix.
+    # assignment comes from the same SKU row, never from kind or prefix.
     dialect: str = "generic"
 
     @property
@@ -115,24 +115,23 @@ LIGHT_FEATURES = frozenset(
 APPLIANCE_FEATURES = frozenset({FEATURE_POWER})
 
 # These lists are intentionally kept as data. Adding a new model is a one-line
-# change, and unknown models still get a power switch rather than disappearing.
-FAN_MODELS = frozenset(
+# change in exactly one row below, and unknown models still get a power switch
+# rather than disappearing. Exact rows are disjoint: the registry rejects a SKU
+# that appears in two of them.
+CEILING_FAN_MODELS = frozenset({"H1310", "H1370", "R1310"})
+TOWER_FAN_MODELS = frozenset(
     {
-        "H1310",
-        "H1370",
         "H7100",
         "H7101",
         "H7102",
         "H7103",
-        "H7105",
         "H7106",
-        "H7107",
         "H7111",
         "H7112",
-        "R1310",
     }
 )
-CEILING_FAN_MODELS = frozenset({"H1310", "H1370", "R1310"})
+FAN_H7105_MODELS = frozenset({"H7105", "H7107"})
+FAN_MODELS = TOWER_FAN_MODELS | FAN_H7105_MODELS
 HEATER1_MODELS = frozenset({"H7130", "H7137", "H713A", "H713C", "H713E"})
 HEATER2_MODELS = frozenset({"H7131", "H7132", "H7133", "H7134", "H7135", "H713B"})
 HEATER_MODELS = HEATER1_MODELS | HEATER2_MODELS
@@ -151,6 +150,9 @@ HUMIDIFIER_MODELS = frozenset(
         "H7160",
     }
 )
+HUMIDIFIER_H7141_MODELS = frozenset({"H7141"})
+HUMIDIFIER_H7142_MODELS = frozenset({"H7142"})
+HUMIDIFIER_GENERIC_MODELS = HUMIDIFIER_MODELS - (HUMIDIFIER_H7141_MODELS | HUMIDIFIER_H7142_MODELS)
 PURIFIER_MODELS = frozenset(
     {
         "H7120",
@@ -171,6 +173,9 @@ PURIFIER_H7126_MODELS = frozenset({"H7126", "H7127", "H7128", "H7129", "H712C"})
 DEHUMIDIFIER_MODELS = frozenset({"H7150", "H7151", "H7152"})
 DIFFUSER_MODELS = frozenset({"H7161", "H7162"})
 ICE_MAKER_MODELS = frozenset({"H7172", "H717D", "H8102", "H8120", "H8121", "H8122", "H8131"})
+ICE_MAKER_H8120_MODELS = frozenset({"H8120"})
+ICE_MAKER_ASCENDING_MODELS = frozenset({"H8121", "H8122"})
+ICE_MAKER_GENERIC_MODELS = ICE_MAKER_MODELS - (ICE_MAKER_H8120_MODELS | ICE_MAKER_ASCENDING_MODELS)
 KETTLE_MODELS = frozenset({"H7170", "H7171", "H7173", "H7175", "H717A"})
 COMPOSTER_MODELS = frozenset({"H7184"})
 TV_MODELS = frozenset({"H1161", "H1163", "H1167", "H1168", "H1162"})
@@ -280,119 +285,77 @@ FAN_SPEEDS: dict[str, int] = {
 }
 
 
-# Per-SKU dialect assignment. One line per SKU, even when several SKUs point at
-# the same observed variant: sharing is an optimisation for SKUs the shipped
-# handler already treated as byte-identical, never an inference from kind or
-# prefix. ``H7141`` and ``H7142`` stay separate because H7142 adds UVC and the
-# night light. Names map to implementations in ``protocol/families``.
-SKU_DIALECTS: dict[str, str] = {
-    # Ceiling fans: exact SKUs despite the H1/R1 light-looking prefixes.
-    "H1310": "ceiling_fan",
-    "H1370": "ceiling_fan",
-    "R1310": "ceiling_fan",
-    # Tower fans; H7105/H7107 are the shipped auto-mode-0x02 variant.
-    "H7100": "fan",
-    "H7101": "fan",
-    "H7102": "fan",
-    "H7103": "fan",
-    "H7105": "fan_h7105",
-    "H7106": "fan",
-    "H7107": "fan_h7105",
-    "H7111": "fan",
-    "H7112": "fan",
-    # Heater1 (plain 0x33 handler).
-    "H7130": "heater1",
-    "H7137": "heater1",
-    "H713A": "heater1",
-    "H713C": "heater1",
-    "H713E": "heater1",
-    # Heater2 (0x3A sub-commands and multiSync).
-    "H7131": "heater2",
-    "H7132": "heater2",
-    "H7133": "heater2",
-    "H7134": "heater2",
-    "H7135": "heater2",
-    "H713B": "heater2",
-    # Humidifiers: the first concrete pair, kept as individual entries.
-    "H7141": "humidifier_h7141",
-    "H7142": "humidifier_h7142",
-    # Dehumidifiers: the shipped handler did not separate these three.
-    "H7150": "dehumidifier",
-    "H7151": "dehumidifier",
-    "H7152": "dehumidifier",
-    # Purifier speed layouts; each line stays explicit even where the shipped
-    # handler grouped SKUs into one observed variant.
-    "H7120": "purifier_h7120",
-    "H7121": "purifier_h7120",
-    "H7122": "purifier_3a",
-    "H7123": "purifier_3a",
-    "H7124": "purifier_3a",
-    "H7126": "purifier_h7126",
-    "H7127": "purifier_h7126",
-    "H7128": "purifier_h7126",
-    "H7129": "purifier_h7126",
-    "H712C": "purifier_h7126",
-    # Ice makers: power register and ice-size direction differ by SKU.
-    "H7172": "ice_maker",
-    "H717D": "ice_maker",
-    "H8102": "ice_maker",
-    "H8131": "ice_maker",
-    "H8120": "ice_maker_h8120",
-    "H8121": "ice_maker_ascending",
-    "H8122": "ice_maker_ascending",
-}
-
-
-# Profile family names are evidence labels for selection bookkeeping, not a
-# taxonomy. A name records why a SKU matched (an explicit model list, a
-# captured handler, or a prefix observed on this profile surface); two SKUs of
-# one kind may carry different names, and one prefix may span several names.
-# Never infer a name from kind, category, or SKU prefix. The explicit
-# priorities encode the collisions that make those guesses wrong: H1310/R1310
-# are ceiling fans despite the H1/R1 light prefix, the H116x set is a TV set
-# despite H1, and H7014 is a switch despite H70.
-PRIORITY_PREFIX = 500
-PRIORITY_FALLBACK = 1000
-
+# One SKU row carries the capability factory, the wire dialect, and the
+# evidence label. Exact rows are expanded from disjoint model lists, so a SKU
+# cannot pick up one row's capabilities and another row's dialect. Prefix and
+# fallback rules are explicit and only apply to SKUs no exact row names.
 Factory = Callable[[str, list[str] | None, dict[str, Any] | None], DeviceProfile]
 
 
 @dataclass(frozen=True, slots=True)
-class ProfileSpec:
-    """One ordered rule in the SKU profile registry.
+class SkuRow:
+    """One authoritative per-SKU profile and dialect assignment."""
 
-    ``matches`` runs in ascending ``priority`` order. Exact-model rules use
-    priorities below ``PRIORITY_PREFIX`` so they always beat prefix rules,
-    regardless of where they appear in the declaration.
-    """
-
+    sku: str
     name: str
-    priority: int
-    matches: Callable[[str], bool]
     factory: Factory
+    dialect: str
+    evidence: str
+    source: str
 
     def build(
         self,
-        sku: str,
         support_cmds: list[str] | None = None,
         properties: dict[str, Any] | None = None,
     ) -> DeviceProfile:
-        """Build this rule's profile and stamp it with the family and dialect."""
+        """Build this row's profile and stamp it with evidence and dialect."""
         return replace(
-            self.factory(sku, support_cmds, properties),
-            family=self.name,
-            dialect=SKU_DIALECTS.get(sku, "generic"),
+            self.factory(self.sku, support_cmds, properties),
+            evidence=self.evidence,
+            dialect=self.dialect,
         )
 
 
-def _exact(models: frozenset[str]) -> Callable[[str], bool]:
-    """Match one of the listed SKUs exactly."""
-    return models.__contains__
+@dataclass(frozen=True, slots=True)
+class SkuGroup:
+    """A compact declaration expanded into one :class:`SkuRow` per SKU.
+
+    ``name`` is the unique rule id; ``evidence`` is the label copied onto every
+    profile the group builds. ``dialect`` is explicit even when it is
+    ``"generic"``: there is no silent fallback for an exact SKU row.
+    """
+
+    name: str
+    models: frozenset[str]
+    factory: Factory
+    dialect: str
+    evidence: str
+    source: str
 
 
-def _matches_any(sku: str) -> bool:
-    """Match every SKU; the registry uses this for its fallback rule."""
-    return True
+def _build_sku_rows(groups: tuple[SkuGroup, ...]) -> dict[str, SkuRow]:
+    """Expand groups into per-SKU rows and reject contradictory assignments."""
+    rows: dict[str, SkuRow] = {}
+    names: set[str] = set()
+    for group in groups:
+        if group.name in names:
+            raise ValueError(f"duplicate profile rule name: {group.name}")
+        if not group.models:
+            raise ValueError(f"profile rule {group.name} has no models")
+        names.add(group.name)
+        for sku in sorted(group.models):
+            existing = rows.get(sku)
+            if existing is not None:
+                raise ValueError(f"{sku} is assigned to both {existing.name} and {group.name}")
+            rows[sku] = SkuRow(
+                sku=sku,
+                name=group.name,
+                factory=group.factory,
+                dialect=group.dialect,
+                evidence=group.evidence,
+                source=group.source,
+            )
+    return rows
 
 
 def _ceiling_fan_profile(
@@ -844,59 +807,241 @@ def is_light_sku(sku: str) -> bool:
     return bool(sku.startswith(("H70", "H73", "H80", "H86", "H88")))
 
 
-def _sorted_registry(*specs: ProfileSpec) -> tuple[ProfileSpec, ...]:
-    """Order specs by explicit priority and reject ambiguous registries."""
-    ordered = tuple(sorted(specs, key=lambda spec: spec.priority))
-    priorities = [spec.priority for spec in ordered]
-    names = [spec.name for spec in ordered]
-    if len(set(priorities)) != len(priorities):
-        raise ValueError("profile registry priorities must be unique")
-    if len(set(names)) != len(names):
-        raise ValueError("profile registry names must be unique")
-    return ordered
-
-
-# Ordered registry: exact-model rules (priorities below PRIORITY_PREFIX) run
-# before the light prefix rule, and the catch-all generic rule runs last.
-# Priority values are explicit because source order is not the contract.
-# Family labels for the model lists below are homebridge-derived unless a code
-# comment above names a captured variant; they are selection evidence only.
-PROFILE_REGISTRY: tuple[ProfileSpec, ...] = _sorted_registry(
-    ProfileSpec("ceiling_fan", 10, _exact(CEILING_FAN_MODELS), _ceiling_fan_profile),
-    ProfileSpec("fan", 20, _exact(FAN_MODELS), _fan_profile),
-    ProfileSpec("heater1", 30, _exact(HEATER1_MODELS), _heater1_profile),
-    ProfileSpec("heater2", 40, _exact(HEATER2_MODELS), _heater2_profile),
-    ProfileSpec("humidifier", 50, _exact(HUMIDIFIER_MODELS), _humidifier_profile),
-    ProfileSpec("purifier_3a", 60, _exact(PURIFIER_3A_MODELS), _purifier_3a_profile),
-    ProfileSpec("purifier_h7120", 70, _exact(PURIFIER_H7120_MODELS), _purifier_h7120_profile),
-    ProfileSpec("purifier_h7126", 80, _exact(PURIFIER_H7126_MODELS), _purifier_h7126_profile),
-    ProfileSpec("dehumidifier", 90, _exact(DEHUMIDIFIER_MODELS), _dehumidifier_profile),
-    ProfileSpec("diffuser", 100, _exact(DIFFUSER_MODELS), _diffuser_profile),
-    ProfileSpec("ice_maker", 110, _exact(ICE_MAKER_MODELS), _ice_maker_profile),
-    ProfileSpec("kettle", 120, _exact(KETTLE_MODELS), _kettle_profile),
-    ProfileSpec("composter", 130, _exact(COMPOSTER_MODELS), _composter_profile),
-    # Exact-model TV rule: these SKUs look like H1 lights but are not.
-    ProfileSpec("tv", 140, _exact(TV_MODELS), _tv_profile),
-    ProfileSpec("switch_triple", 150, _exact(SWITCH_TRIPLE_MODELS), _switch_triple_profile),
-    ProfileSpec("switch_double", 160, _exact(SWITCH_DOUBLE_MODELS), _switch_double_profile),
-    # Exact-model switch rule: H7014 looks like an H70 light but is not.
-    ProfileSpec("switch_single", 170, _exact(SWITCH_SINGLE_MODELS), _switch_single_profile),
-    ProfileSpec("leak_sensor", 180, _exact(LEAK_MODELS), _leak_sensor_profile),
-    ProfileSpec("co2_sensor", 190, _exact(CO2_MODELS), _co2_sensor_profile),
-    ProfileSpec("presence_sensor", 200, _exact(PRESENCE_MODELS), _presence_sensor_profile),
-    ProfileSpec("contact_sensor", 210, _exact(CONTACT_MODELS), _contact_sensor_profile),
-    ProfileSpec("probe_sensor", 220, _exact(PROBE_MODELS), _probe_sensor_profile),
-    ProfileSpec("monitor_sensor", 230, _exact(MONITOR_MODELS), _monitor_sensor_profile),
-    ProfileSpec("thermo_sensor", 240, _exact(THERMO_MODELS), _thermo_sensor_profile),
-    ProfileSpec(
-        "unknown_sensor",
-        250,
-        lambda sku: sku in BUTTON_MODELS or sku in UNKNOWN_SENSOR_MODELS,
-        _unknown_sensor_profile,
+# Profile evidence labels record why a row matched (an explicit model list or a
+# captured handler), not a taxonomy. Two SKUs of one kind may carry different
+# labels and different dialects. The exact rows are disjoint, which is what
+# makes the prefix collisions explicit rather than order-dependent: H1310/R1310
+# are ceiling fans despite the H1/R1 light prefix, the H116x set is a TV set
+# despite H1, and H7014 is a switch despite H70.
+_SKU_GROUPS: tuple[SkuGroup, ...] = (
+    SkuGroup(
+        "ceiling_fan",
+        CEILING_FAN_MODELS,
+        _ceiling_fan_profile,
+        "ceiling_fan",
+        "ceiling_fan",
+        "verified ceiling-fan handler",
     ),
-    ProfileSpec("light_prefix", PRIORITY_PREFIX, is_light_sku, _light_prefix_profile),
-    ProfileSpec("generic", PRIORITY_FALLBACK, _matches_any, _generic_profile),
+    SkuGroup("fan", TOWER_FAN_MODELS, _fan_profile, "fan", "fan", "verified tower-fan handler"),
+    SkuGroup(
+        "fan_h7105",
+        FAN_H7105_MODELS,
+        _fan_profile,
+        "fan_h7105",
+        "fan",
+        "verified H7105/H7107 auto-mode handler",
+    ),
+    SkuGroup(
+        "heater1",
+        HEATER1_MODELS,
+        _heater1_profile,
+        "heater1",
+        "heater1",
+        "verified heater1 handler",
+    ),
+    SkuGroup(
+        "heater2",
+        HEATER2_MODELS,
+        _heater2_profile,
+        "heater2",
+        "heater2",
+        "verified H7131 handler",
+    ),
+    SkuGroup(
+        "humidifier_h7141",
+        HUMIDIFIER_H7141_MODELS,
+        _humidifier_profile,
+        "humidifier_h7141",
+        "humidifier",
+        "verified H7141 handler",
+    ),
+    SkuGroup(
+        "humidifier_h7142",
+        HUMIDIFIER_H7142_MODELS,
+        _humidifier_profile,
+        "humidifier_h7142",
+        "humidifier",
+        "verified H7142 handler",
+    ),
+    SkuGroup(
+        "humidifier_generic",
+        HUMIDIFIER_GENERIC_MODELS,
+        _humidifier_profile,
+        "generic",
+        "humidifier",
+        "shipped humidifier model list; no dialect evidence",
+    ),
+    SkuGroup(
+        "purifier_3a",
+        PURIFIER_3A_MODELS,
+        _purifier_3a_profile,
+        "purifier_3a",
+        "purifier_3a",
+        "verified 0x3A purifier handler",
+    ),
+    SkuGroup(
+        "purifier_h7120",
+        PURIFIER_H7120_MODELS,
+        _purifier_h7120_profile,
+        "purifier_h7120",
+        "purifier_h7120",
+        "verified H7120 gear handler",
+    ),
+    SkuGroup(
+        "purifier_h7126",
+        PURIFIER_H7126_MODELS,
+        _purifier_h7126_profile,
+        "purifier_h7126",
+        "purifier_h7126",
+        "verified H7126 speed handler",
+    ),
+    SkuGroup(
+        "dehumidifier",
+        DEHUMIDIFIER_MODELS,
+        _dehumidifier_profile,
+        "dehumidifier",
+        "dehumidifier",
+        "verified dehumidifier handler",
+    ),
+    SkuGroup(
+        "diffuser",
+        DIFFUSER_MODELS,
+        _diffuser_profile,
+        "generic",
+        "diffuser",
+        "shipped model list",
+    ),
+    SkuGroup(
+        "ice_maker",
+        ICE_MAKER_GENERIC_MODELS,
+        _ice_maker_profile,
+        "ice_maker",
+        "ice_maker",
+        "verified ice-maker handler",
+    ),
+    SkuGroup(
+        "ice_maker_h8120",
+        ICE_MAKER_H8120_MODELS,
+        _ice_maker_profile,
+        "ice_maker_h8120",
+        "ice_maker",
+        "verified H8120 power handler",
+    ),
+    SkuGroup(
+        "ice_maker_ascending",
+        ICE_MAKER_ASCENDING_MODELS,
+        _ice_maker_profile,
+        "ice_maker_ascending",
+        "ice_maker",
+        "verified H8121/H8122 ice-size handler",
+    ),
+    SkuGroup("kettle", KETTLE_MODELS, _kettle_profile, "generic", "kettle", "shipped model list"),
+    SkuGroup(
+        "composter",
+        COMPOSTER_MODELS,
+        _composter_profile,
+        "generic",
+        "composter",
+        "shipped model list",
+    ),
+    SkuGroup("tv", TV_MODELS, _tv_profile, "generic", "tv", "explicit TV model list"),
+    SkuGroup(
+        "switch_triple",
+        SWITCH_TRIPLE_MODELS,
+        _switch_triple_profile,
+        "generic",
+        "switch_triple",
+        "explicit switch model list",
+    ),
+    SkuGroup(
+        "switch_double",
+        SWITCH_DOUBLE_MODELS,
+        _switch_double_profile,
+        "generic",
+        "switch_double",
+        "explicit switch model list",
+    ),
+    SkuGroup(
+        "switch_single",
+        SWITCH_SINGLE_MODELS,
+        _switch_single_profile,
+        "generic",
+        "switch_single",
+        "explicit switch model list",
+    ),
+    SkuGroup(
+        "leak_sensor",
+        LEAK_MODELS,
+        _leak_sensor_profile,
+        "generic",
+        "leak_sensor",
+        "shipped model list",
+    ),
+    SkuGroup(
+        "co2_sensor",
+        CO2_MODELS,
+        _co2_sensor_profile,
+        "generic",
+        "co2_sensor",
+        "shipped model list",
+    ),
+    SkuGroup(
+        "presence_sensor",
+        PRESENCE_MODELS,
+        _presence_sensor_profile,
+        "generic",
+        "presence_sensor",
+        "shipped model list",
+    ),
+    SkuGroup(
+        "contact_sensor",
+        CONTACT_MODELS,
+        _contact_sensor_profile,
+        "generic",
+        "contact_sensor",
+        "shipped model list",
+    ),
+    SkuGroup(
+        "probe_sensor",
+        PROBE_MODELS,
+        _probe_sensor_profile,
+        "generic",
+        "probe_sensor",
+        "shipped model list",
+    ),
+    SkuGroup(
+        "monitor_sensor",
+        MONITOR_MODELS,
+        _monitor_sensor_profile,
+        "generic",
+        "monitor_sensor",
+        "shipped model list",
+    ),
+    SkuGroup(
+        "thermo_sensor",
+        THERMO_MODELS,
+        _thermo_sensor_profile,
+        "generic",
+        "thermo_sensor",
+        "shipped model list",
+    ),
+    SkuGroup(
+        "unknown_sensor",
+        BUTTON_MODELS | UNKNOWN_SENSOR_MODELS,
+        _unknown_sensor_profile,
+        "generic",
+        "unknown_sensor",
+        "shipped model list",
+    ),
 )
+
+# The one authoritative SKU index: profile factory, dialect, and evidence.
+SKU_ROWS: dict[str, SkuRow] = _build_sku_rows(_SKU_GROUPS)
+
+
+def sku_row(sku: str) -> SkuRow | None:
+    """Return the exact SKU row, or ``None`` when a prefix rule applies."""
+    return SKU_ROWS.get((sku or "").strip().upper())
 
 
 def profile_for(
@@ -907,12 +1052,20 @@ def profile_for(
     """Build the profile for a model, using the cloud capability list if present."""
     sku = (sku or "").strip().upper()
 
-    for spec in PROFILE_REGISTRY:
-        if spec.matches(sku):
-            return spec.build(sku, support_cmds, properties)
-
-    # The generic rule matches every SKU, so this is unreachable.
-    raise AssertionError("profile registry is missing its catch-all rule")
+    row = SKU_ROWS.get(sku)
+    if row is not None:
+        return row.build(support_cmds, properties)
+    if is_light_sku(sku):
+        return replace(
+            _light_prefix_profile(sku, support_cmds, properties),
+            evidence="light_prefix",
+            dialect="generic",
+        )
+    return replace(
+        _generic_profile(sku, support_cmds, properties),
+        evidence="generic",
+        dialect="generic",
+    )
 
 
 def sensor_keys(profile: DeviceProfile) -> tuple[str, ...]:

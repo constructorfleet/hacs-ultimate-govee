@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from typing import Any
 
+import pytest
+
 from custom_components.ultimate_govee.fleet import Fleet
 from custom_components.ultimate_govee.models import DeviceState
 
@@ -236,3 +238,46 @@ def test_refresh_notifies_once_for_multiple_transitions() -> None:
     assert first.state.online is False
     assert fleet.get("device-2") is not None
     assert calls == [1]
+
+
+def test_refresh_commits_after_every_step_so_listeners_see_final_state() -> None:
+    """A listener runs at the commit boundary, not between refresh steps."""
+    fleet = Fleet()
+    fleet.reconcile([_raw("device-1")])
+    snapshots: list[tuple[set[str], bool | None]] = []
+
+    def listener() -> None:
+        snapshots.append(
+            (
+                set(fleet.by_id),
+                fleet["device-1"].state.online,
+            )
+        )
+
+    fleet.add_listener(listener)
+
+    fleet.refresh([_raw("device-2")])
+
+    assert snapshots == [({"device-1", "device-2"}, False)]
+
+
+def test_no_op_mutations_do_not_commit_a_notification() -> None:
+    fleet = Fleet()
+    fleet.reconcile([_raw("device-1")])
+    fleet.reconcile_seen({"device-1"})
+    calls: list[int] = []
+    fleet.add_listener(lambda: calls.append(1))
+
+    fleet.reconcile([_raw("device-1")])
+    fleet.reconcile_seen({"device-1"})
+    assert fleet.apply_state("device-1", DeviceState(online=True)) is False
+
+    assert calls == []
+
+
+def test_a_change_recorded_outside_a_commit_block_is_rejected() -> None:
+    """Recording a change is only meaningful inside the commit boundary."""
+    fleet = Fleet()
+
+    with pytest.raises(RuntimeError, match="outside a change block"):
+        fleet._record()
