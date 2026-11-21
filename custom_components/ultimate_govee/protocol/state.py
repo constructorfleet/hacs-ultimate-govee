@@ -140,6 +140,12 @@ def _decode_state_object(profile: DeviceProfile, value: Any, result: dict[str, A
         result["color"] = _colour(value["color"])
     if "mode" in value:
         result["mode"] = _mode(value["mode"])
+    if "setTemperature" in value:
+        result["target_temperature"] = _as_number(value["setTemperature"])
+    if "targetTemperature" in value:
+        result["target_temperature"] = _as_number(value["targetTemperature"])
+    if "setTem" in value:
+        result["target_temperature"] = _as_number(value["setTem"])
     if "humidity" in value:
         result["humidity"] = _humidity(profile, value["humidity"])
     if "temperature" in value:
@@ -298,7 +304,13 @@ def _decode_frame(
         result["oscillation"] = payload[1] != 0
         result["lock"] = payload[2] != 0
     elif register == 0x1A and payload:
-        result["uv"] = payload[0] != 0
+        if kind == KIND_HEATER and len(payload) >= 4:
+            raw = (payload[2] << 8) | payload[3]
+            if raw & 0x8000:
+                fahrenheit = (raw & 0x7FFF) / 100
+                result["target_temperature"] = round((fahrenheit - 32) * 5 / 9, 1)
+        else:
+            result["uv"] = payload[0] != 0
     elif register == 0x17 and len(payload) >= 2:
         result["basket_full"] = payload[1] != 0
         result["water_shortage"] = payload[1] != 0

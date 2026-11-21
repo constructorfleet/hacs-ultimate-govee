@@ -135,9 +135,9 @@ class GoveeCoordinator(DataUpdateCoordinator[GoveeData]):
             else:
                 _update_device_metadata(device, raw)
 
-        for device_id in list(devices):
-            if device_id not in seen and not devices[device_id].lan_reachable:
-                del devices[device_id]
+        for device_id, device in devices.items():
+            if device_id not in seen and not device.lan_reachable:
+                device.state.online = False
 
         await self._async_poll_devices()
         self.devices = devices
