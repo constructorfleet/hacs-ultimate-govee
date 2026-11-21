@@ -6,6 +6,7 @@ from collections.abc import Iterator
 from unittest.mock import patch
 
 import pytest
+from homeassistant.components import bluetooth as _bluetooth  # noqa: F401
 
 pytest_plugins = "pytest_homeassistant_custom_component"
 
