@@ -9,7 +9,7 @@ from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
 from .coordinator import GoveeCoordinator
 from .entity import GoveeEntity
-from .profiles import KIND_HEATER, KIND_ICE_MAKER
+from .entity_plan import PLATFORM_SELECT, entities_for_platform
 from .protocol import commands
 
 
@@ -22,26 +22,16 @@ async def async_setup_entry(
     coordinator: GoveeCoordinator = entry.runtime_data
     entities: list[GoveeSelect] = []
     for device in coordinator.devices.values():
-        if device.profile.kind == KIND_ICE_MAKER and device.profile.ice_sizes:
-            entities.append(
-                GoveeSelect(
-                    coordinator,
-                    device.device_id,
-                    "ice_size",
-                    "Ice size",
-                    list(device.profile.ice_sizes),
-                )
+        entities.extend(
+            GoveeSelect(
+                coordinator,
+                device.device_id,
+                spec.key,
+                spec.name or spec.key,
+                list(spec.options),
             )
-        elif device.profile.kind == KIND_HEATER:
-            entities.append(
-                GoveeSelect(
-                    coordinator,
-                    device.device_id,
-                    "fan_speed",
-                    "Fan speed",
-                    list(device.profile.modes) or ["low", "medium", "high"],
-                )
-            )
+            for spec in entities_for_platform(device.profile, PLATFORM_SELECT)
+        )
     async_add_entities(entities)
 
 

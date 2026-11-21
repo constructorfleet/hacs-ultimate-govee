@@ -3,11 +3,13 @@
 The SKU lists come from the reverse-engineered protocol work in
 constructorfleet/ultimate-govee and the homebridge-govee project. A profile
 describes what a device can do, not how Home Assistant should draw it; the
-platform modules turn the profile into entities.
+entity plan turns a profile into entities and the platform modules instantiate
+them.
 """
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass, replace
 from typing import Any
 
@@ -41,11 +43,9 @@ FEATURE_NIGHT_LIGHT = "night_light"
 FEATURE_DISPLAY = "display"
 FEATURE_LOCK = "lock"
 FEATURE_UV = "uv"
-FEATURE_TIMER = "timer"
 FEATURE_FILTER = "filter"
 FEATURE_WATER_TANK = "water_tank"
 FEATURE_OSCILLATION = "oscillation"
-FEATURE_SWING = "swing"
 FEATURE_ICE_SIZE = "ice_size"
 FEATURE_BASKET = "basket"
 FEATURE_TARGET_HUMIDITY = "target_humidity"
@@ -61,7 +61,7 @@ FEATURE_LEAK = "leak"
 FEATURE_PRESENCE = "presence"
 FEATURE_CONTACT = "contact"
 FEATURE_TARGET_TEMPERATURE = "target_temperature"
-FEATURE_TANK = "tank"
+FEATURE_POWER_METERING = "power_metering"
 
 
 @dataclass(frozen=True, slots=True)
@@ -81,6 +81,9 @@ class DeviceProfile:
     model_name: str = ""
     ice_sizes: tuple[str, ...] = ()
     modes: tuple[str, ...] = ()
+    # Evidence label for the registry rule that selected this profile. It is
+    # not a wire dialect or a taxonomy; see the note above PROFILE_REGISTRY.
+    family: str = "generic"
 
     @property
     def supports_color(self) -> bool:
@@ -183,6 +186,9 @@ SWITCH_SINGLE_MODELS = frozenset(
 SWITCH_DOUBLE_MODELS = frozenset({"H5082", "H5089"})
 SWITCH_TRIPLE_MODELS = frozenset({"H5160", "H5161"})
 
+# The only switch family that reports voltage, current and power usage.
+POWER_METERING_MODELS = frozenset({"H5086"})
+
 LEAK_MODELS = frozenset({"H5054", "H5058", "H5059", "H5830"})
 THERMO_MODELS = frozenset(
     {
@@ -279,6 +285,448 @@ FAN_SPEEDS: dict[str, int] = {
 }
 
 
+# Profile family names are evidence labels for selection bookkeeping, not a
+# taxonomy. A name records why a SKU matched (an explicit model list, a
+# captured handler, or a prefix observed on this profile surface); two SKUs of
+# one kind may carry different names, and one prefix may span several names.
+# Never infer a name from kind, category, or SKU prefix. The explicit
+# priorities encode the collisions that make those guesses wrong: H1310/R1310
+# are ceiling fans despite the H1/R1 light prefix, the H116x set is a TV set
+# despite H1, and H7014 is a switch despite H70.
+PRIORITY_PREFIX = 500
+PRIORITY_FALLBACK = 1000
+
+Factory = Callable[[str, list[str] | None, dict[str, Any] | None], DeviceProfile]
+
+
+@dataclass(frozen=True, slots=True)
+class ProfileSpec:
+    """One ordered rule in the SKU profile registry.
+
+    ``matches`` runs in ascending ``priority`` order. Exact-model rules use
+    priorities below ``PRIORITY_PREFIX`` so they always beat prefix rules,
+    regardless of where they appear in the declaration.
+    """
+
+    name: str
+    priority: int
+    matches: Callable[[str], bool]
+    factory: Factory
+
+    def build(
+        self,
+        sku: str,
+        support_cmds: list[str] | None = None,
+        properties: dict[str, Any] | None = None,
+    ) -> DeviceProfile:
+        """Build this rule's profile and stamp it with the family name."""
+        return replace(
+            self.factory(sku, support_cmds, properties),
+            family=self.name,
+        )
+
+
+def _exact(models: frozenset[str]) -> Callable[[str], bool]:
+    """Match one of the listed SKUs exactly."""
+    return models.__contains__
+
+
+def _matches_any(sku: str) -> bool:
+    """Match every SKU; the registry uses this for its fallback rule."""
+    return True
+
+
+def _ceiling_fan_profile(
+    sku: str,
+    _support_cmds: list[str] | None = None,
+    _properties: dict[str, Any] | None = None,
+) -> DeviceProfile:
+    return DeviceProfile(
+        kind=KIND_CEILING_FAN,
+        features={
+            FEATURE_POWER,
+            FEATURE_FAN,
+            FEATURE_BRIGHTNESS,
+            FEATURE_COLOR,
+            FEATURE_COLOR_TEMP,
+        },
+        fan_speeds=FAN_SPEEDS.get(sku, 6),
+        model_name=sku,
+    )
+
+
+def _fan_profile(
+    sku: str,
+    _support_cmds: list[str] | None = None,
+    _properties: dict[str, Any] | None = None,
+) -> DeviceProfile:
+    features = {
+        FEATURE_POWER,
+        FEATURE_FAN,
+        FEATURE_OSCILLATION,
+    }
+    if sku in {"H7105", "H7107"}:
+        features.add(FEATURE_NIGHT_LIGHT)
+    return DeviceProfile(
+        kind=KIND_FAN,
+        features=features,
+        fan_speeds=FAN_SPEEDS.get(sku, 8),
+        model_name=sku,
+    )
+
+
+def _heater1_profile(
+    sku: str,
+    _support_cmds: list[str] | None = None,
+    _properties: dict[str, Any] | None = None,
+) -> DeviceProfile:
+    return DeviceProfile(
+        kind=KIND_HEATER,
+        features={
+            FEATURE_POWER,
+            FEATURE_TARGET_TEMPERATURE,
+            FEATURE_TEMPERATURE,
+            FEATURE_FAN,
+            FEATURE_MODE,
+            FEATURE_LOCK,
+            FEATURE_OSCILLATION,
+        },
+        fan_speeds=3,
+        modes=("low", "medium", "high"),
+        model_name=sku,
+    )
+
+
+def _heater2_profile(
+    sku: str,
+    _support_cmds: list[str] | None = None,
+    _properties: dict[str, Any] | None = None,
+) -> DeviceProfile:
+    return DeviceProfile(
+        kind=KIND_HEATER,
+        features={
+            FEATURE_POWER,
+            FEATURE_TARGET_TEMPERATURE,
+            FEATURE_TEMPERATURE,
+            FEATURE_FAN,
+            FEATURE_MODE,
+            FEATURE_NIGHT_LIGHT,
+            FEATURE_LOCK,
+            FEATURE_OSCILLATION,
+        },
+        fan_speeds=4,
+        modes=("fan-only", "low", "medium", "high"),
+        model_name=sku,
+    )
+
+
+def _humidifier_profile(
+    sku: str,
+    _support_cmds: list[str] | None = None,
+    _properties: dict[str, Any] | None = None,
+) -> DeviceProfile:
+    features: set[str] = {
+        FEATURE_POWER,
+        FEATURE_TARGET_HUMIDITY,
+        FEATURE_HUMIDITY,
+        FEATURE_MODE,
+        FEATURE_WATER_TANK,
+    }
+    # Only these models implement the 0x1B night light.
+    if sku in {"H7140", "H7142", "H7160"}:
+        features.add(FEATURE_NIGHT_LIGHT)
+    # Humidity decoding and automatic mode are known on the H7141/H7142.
+    if sku not in {"H7141", "H7142"}:
+        features -= {FEATURE_TARGET_HUMIDITY, FEATURE_HUMIDITY, FEATURE_MODE}
+    # The H7142 is the only humidifier with UVC.
+    if sku == "H7142":
+        features.add(FEATURE_UV)
+    return DeviceProfile(
+        kind=KIND_HUMIDIFIER,
+        features=frozenset(features),
+        fan_speeds=9 if sku in {"H7142", "H7160"} else 8,
+        modes=("manual", "auto", "program") if FEATURE_MODE in features else (),
+        model_name=sku,
+    )
+
+
+def _purifier_profile(
+    sku: str,
+    *,
+    speeds: int,
+    modes: tuple[str, ...],
+) -> DeviceProfile:
+    features: set[str] = {
+        FEATURE_POWER,
+        FEATURE_FAN,
+        FEATURE_FILTER,
+        FEATURE_DISPLAY,
+        FEATURE_LOCK,
+        FEATURE_NIGHT_LIGHT,
+        FEATURE_MODE,
+    }
+    # PM2.5 is decoded from AA 1C on the H7122; the H7123 reports a
+    # five-level air-quality enum instead.
+    if sku == "H7122":
+        features.add(FEATURE_PM25)
+    elif sku == "H7123":
+        features.add(FEATURE_AIR_QUALITY)
+    return DeviceProfile(
+        kind=KIND_PURIFIER,
+        features=frozenset(features),
+        fan_speeds=speeds,
+        modes=modes,
+        model_name=sku,
+    )
+
+
+def _purifier_3a_profile(
+    sku: str,
+    _support_cmds: list[str] | None = None,
+    _properties: dict[str, Any] | None = None,
+) -> DeviceProfile:
+    return _purifier_profile(
+        sku,
+        speeds=5,
+        modes=("sleep", "low", "medium", "high", "auto"),
+    )
+
+
+def _purifier_h7120_profile(
+    sku: str,
+    _support_cmds: list[str] | None = None,
+    _properties: dict[str, Any] | None = None,
+) -> DeviceProfile:
+    return _purifier_profile(
+        sku,
+        speeds=4,
+        modes=("sleep", "low", "medium", "high"),
+    )
+
+
+def _purifier_h7126_profile(
+    sku: str,
+    _support_cmds: list[str] | None = None,
+    _properties: dict[str, Any] | None = None,
+) -> DeviceProfile:
+    return _purifier_profile(
+        sku,
+        speeds=3,
+        modes=("sleep", "low", "high"),
+    )
+
+
+def _dehumidifier_profile(
+    sku: str,
+    _support_cmds: list[str] | None = None,
+    _properties: dict[str, Any] | None = None,
+) -> DeviceProfile:
+    return DeviceProfile(
+        kind=KIND_DEHUMIDIFIER,
+        features={
+            FEATURE_POWER,
+            FEATURE_TARGET_HUMIDITY,
+            FEATURE_HUMIDITY,
+            FEATURE_TEMPERATURE,
+            FEATURE_FAN,
+            FEATURE_MODE,
+            FEATURE_WATER_TANK,
+        },
+        fan_speeds=8,
+        modes=("low", "medium", "high", "auto"),
+        model_name=sku,
+    )
+
+
+def _diffuser_profile(
+    sku: str,
+    _support_cmds: list[str] | None = None,
+    _properties: dict[str, Any] | None = None,
+) -> DeviceProfile:
+    return DeviceProfile(
+        kind=KIND_DIFFUSER,
+        features={FEATURE_POWER},
+        model_name=sku,
+    )
+
+
+def _ice_maker_profile(
+    sku: str,
+    _support_cmds: list[str] | None = None,
+    _properties: dict[str, Any] | None = None,
+) -> DeviceProfile:
+    if sku in {"H8102", "H8131"}:
+        return DeviceProfile(
+            kind=KIND_ICE_MAKER,
+            features={FEATURE_POWER},
+            model_name=sku,
+        )
+    features = {FEATURE_POWER}
+    ice_sizes: tuple[str, ...] = ()
+    if sku != "H8120":
+        features.add(FEATURE_ICE_SIZE)
+        ice_sizes = ICE_SIZES
+    return DeviceProfile(
+        kind=KIND_ICE_MAKER,
+        features=features,
+        ice_sizes=ice_sizes,
+        model_name=sku,
+    )
+
+
+def _kettle_profile(
+    sku: str,
+    _support_cmds: list[str] | None = None,
+    _properties: dict[str, Any] | None = None,
+) -> DeviceProfile:
+    return DeviceProfile(
+        kind=KIND_KETTLE,
+        features={
+            FEATURE_POWER,
+            FEATURE_TEMPERATURE,
+            FEATURE_MODE,
+        },
+        modes=("custom", "green_tea", "oolong_tea", "coffee", "black_tea"),
+        model_name=sku,
+    )
+
+
+def _composter_profile(
+    sku: str,
+    _support_cmds: list[str] | None = None,
+    _properties: dict[str, Any] | None = None,
+) -> DeviceProfile:
+    return DeviceProfile(
+        kind=KIND_COMPOSTER,
+        features={FEATURE_POWER},
+        model_name=sku,
+    )
+
+
+def _tv_profile(
+    sku: str,
+    _support_cmds: list[str] | None = None,
+    _properties: dict[str, Any] | None = None,
+) -> DeviceProfile:
+    return DeviceProfile(
+        kind=KIND_TV,
+        features={FEATURE_POWER, FEATURE_BRIGHTNESS, FEATURE_COLOR, FEATURE_COLOR_TEMP},
+        model_name=sku,
+    )
+
+
+def _switch_triple_profile(
+    sku: str,
+    _support_cmds: list[str] | None = None,
+    _properties: dict[str, Any] | None = None,
+) -> DeviceProfile:
+    return DeviceProfile(
+        kind=KIND_SWITCH,
+        gang_count=3,
+        features={FEATURE_POWER},
+        model_name=sku,
+    )
+
+
+def _switch_double_profile(
+    sku: str,
+    _support_cmds: list[str] | None = None,
+    _properties: dict[str, Any] | None = None,
+) -> DeviceProfile:
+    return DeviceProfile(
+        kind=KIND_SWITCH,
+        gang_count=2,
+        features={FEATURE_POWER},
+        model_name=sku,
+    )
+
+
+def _switch_single_profile(
+    sku: str,
+    _support_cmds: list[str] | None = None,
+    _properties: dict[str, Any] | None = None,
+) -> DeviceProfile:
+    on, off = POWER_OVERRIDES.get(sku, (1, 0))
+    features = {FEATURE_POWER}
+    if sku in POWER_METERING_MODELS:
+        features.add(FEATURE_POWER_METERING)
+    return DeviceProfile(
+        kind=KIND_SWITCH,
+        features=features,
+        power_on=on,
+        power_off=off,
+        model_name=sku,
+    )
+
+
+def _sensor_profile(sku: str, kind: str, features: frozenset[str]) -> DeviceProfile:
+    return DeviceProfile(kind=kind, features=features | {FEATURE_BATTERY}, model_name=sku)
+
+
+def _leak_sensor_profile(
+    sku: str,
+    _support_cmds: list[str] | None = None,
+    _properties: dict[str, Any] | None = None,
+) -> DeviceProfile:
+    return _sensor_profile(sku, KIND_LEAK, {FEATURE_LEAK})
+
+
+def _co2_sensor_profile(
+    sku: str,
+    _support_cmds: list[str] | None = None,
+    _properties: dict[str, Any] | None = None,
+) -> DeviceProfile:
+    return _sensor_profile(sku, KIND_CO2, {FEATURE_CO2, FEATURE_TEMPERATURE, FEATURE_HUMIDITY})
+
+
+def _presence_sensor_profile(
+    sku: str,
+    _support_cmds: list[str] | None = None,
+    _properties: dict[str, Any] | None = None,
+) -> DeviceProfile:
+    return _sensor_profile(sku, KIND_PRESENCE, {FEATURE_PRESENCE})
+
+
+def _contact_sensor_profile(
+    sku: str,
+    _support_cmds: list[str] | None = None,
+    _properties: dict[str, Any] | None = None,
+) -> DeviceProfile:
+    return _sensor_profile(sku, KIND_CONTACT, {FEATURE_CONTACT})
+
+
+def _probe_sensor_profile(
+    sku: str,
+    _support_cmds: list[str] | None = None,
+    _properties: dict[str, Any] | None = None,
+) -> DeviceProfile:
+    return _sensor_profile(sku, KIND_PROBE, {FEATURE_TEMPERATURE})
+
+
+def _monitor_sensor_profile(
+    sku: str,
+    _support_cmds: list[str] | None = None,
+    _properties: dict[str, Any] | None = None,
+) -> DeviceProfile:
+    return _sensor_profile(sku, KIND_MONITOR, {FEATURE_TEMPERATURE, FEATURE_HUMIDITY})
+
+
+def _thermo_sensor_profile(
+    sku: str,
+    _support_cmds: list[str] | None = None,
+    _properties: dict[str, Any] | None = None,
+) -> DeviceProfile:
+    return _sensor_profile(sku, KIND_THERMO, {FEATURE_TEMPERATURE, FEATURE_HUMIDITY})
+
+
+def _unknown_sensor_profile(
+    sku: str,
+    _support_cmds: list[str] | None = None,
+    _properties: dict[str, Any] | None = None,
+) -> DeviceProfile:
+    return _sensor_profile(sku, KIND_UNKNOWN, {FEATURE_BATTERY})
+
+
 def _light_profile(sku: str, features: frozenset[str]) -> DeviceProfile:
     minimum, maximum = KELVIN_OVERRIDES.get(sku, (2000, 9000))
     return DeviceProfile(
@@ -292,15 +740,104 @@ def _light_profile(sku: str, features: frozenset[str]) -> DeviceProfile:
     )
 
 
-def _sensor_profile(sku: str, kind: str, features: frozenset[str]) -> DeviceProfile:
-    return DeviceProfile(kind=kind, features=features | {FEATURE_BATTERY}, model_name=sku)
+def _light_prefix_profile(
+    sku: str,
+    support_cmds: list[str] | None = None,
+    properties: dict[str, Any] | None = None,
+) -> DeviceProfile:
+    features = set(LIGHT_FEATURES)
+    # A cloud capability list is authoritative when the device provides one.
+    command_names = {str(command).lower() for command in support_cmds or []}
+    if command_names:
+        if not any("color" in command for command in command_names):
+            features.discard(FEATURE_COLOR)
+        if not any("colortem" in command or "color_tem" in command for command in command_names):
+            features.discard(FEATURE_COLOR_TEMP)
+    profile = _light_profile(sku, frozenset(features))
+    kelvin = (properties or {}).get("colorTem", {}).get("range", {})
+    if isinstance(kelvin, dict) and kelvin.get("min") and kelvin.get("max"):
+        profile = replace(
+            profile,
+            min_kelvin=int(kelvin["min"]),
+            max_kelvin=int(kelvin["max"]),
+        )
+    return profile
+
+
+def _generic_profile(
+    sku: str,
+    _support_cmds: list[str] | None = None,
+    _properties: dict[str, Any] | None = None,
+) -> DeviceProfile:
+    # Unknown devices still get power, which every appliance the reverse
+    # engineering work has seen accepts.
+    return DeviceProfile(
+        kind=KIND_SWITCH,
+        features={FEATURE_POWER},
+        model_name=sku,
+    )
 
 
 def is_light_sku(sku: str) -> bool:
-    """Return whether a SKU belongs to the light family."""
+    """Return whether a SKU belongs to the light prefix family."""
     if sku.startswith(("H6", "H1", "H2", "H3", "R1", "R2", "R6", "R7")):
         return True
     return bool(sku.startswith(("H70", "H73", "H80", "H86", "H88")))
+
+
+def _sorted_registry(*specs: ProfileSpec) -> tuple[ProfileSpec, ...]:
+    """Order specs by explicit priority and reject ambiguous registries."""
+    ordered = tuple(sorted(specs, key=lambda spec: spec.priority))
+    priorities = [spec.priority for spec in ordered]
+    names = [spec.name for spec in ordered]
+    if len(set(priorities)) != len(priorities):
+        raise ValueError("profile registry priorities must be unique")
+    if len(set(names)) != len(names):
+        raise ValueError("profile registry names must be unique")
+    return ordered
+
+
+# Ordered registry: exact-model rules (priorities below PRIORITY_PREFIX) run
+# before the light prefix rule, and the catch-all generic rule runs last.
+# Priority values are explicit because source order is not the contract.
+# Family labels for the model lists below are homebridge-derived unless a code
+# comment above names a captured variant; they are selection evidence only.
+PROFILE_REGISTRY: tuple[ProfileSpec, ...] = _sorted_registry(
+    ProfileSpec("ceiling_fan", 10, _exact(CEILING_FAN_MODELS), _ceiling_fan_profile),
+    ProfileSpec("fan", 20, _exact(FAN_MODELS), _fan_profile),
+    ProfileSpec("heater1", 30, _exact(HEATER1_MODELS), _heater1_profile),
+    ProfileSpec("heater2", 40, _exact(HEATER2_MODELS), _heater2_profile),
+    ProfileSpec("humidifier", 50, _exact(HUMIDIFIER_MODELS), _humidifier_profile),
+    ProfileSpec("purifier_3a", 60, _exact(PURIFIER_3A_MODELS), _purifier_3a_profile),
+    ProfileSpec("purifier_h7120", 70, _exact(PURIFIER_H7120_MODELS), _purifier_h7120_profile),
+    ProfileSpec("purifier_h7126", 80, _exact(PURIFIER_H7126_MODELS), _purifier_h7126_profile),
+    ProfileSpec("dehumidifier", 90, _exact(DEHUMIDIFIER_MODELS), _dehumidifier_profile),
+    ProfileSpec("diffuser", 100, _exact(DIFFUSER_MODELS), _diffuser_profile),
+    ProfileSpec("ice_maker", 110, _exact(ICE_MAKER_MODELS), _ice_maker_profile),
+    ProfileSpec("kettle", 120, _exact(KETTLE_MODELS), _kettle_profile),
+    ProfileSpec("composter", 130, _exact(COMPOSTER_MODELS), _composter_profile),
+    # Exact-model TV rule: these SKUs look like H1 lights but are not.
+    ProfileSpec("tv", 140, _exact(TV_MODELS), _tv_profile),
+    ProfileSpec("switch_triple", 150, _exact(SWITCH_TRIPLE_MODELS), _switch_triple_profile),
+    ProfileSpec("switch_double", 160, _exact(SWITCH_DOUBLE_MODELS), _switch_double_profile),
+    # Exact-model switch rule: H7014 looks like an H70 light but is not.
+    ProfileSpec("switch_single", 170, _exact(SWITCH_SINGLE_MODELS), _switch_single_profile),
+    ProfileSpec("leak_sensor", 180, _exact(LEAK_MODELS), _leak_sensor_profile),
+    ProfileSpec("co2_sensor", 190, _exact(CO2_MODELS), _co2_sensor_profile),
+    ProfileSpec("presence_sensor", 200, _exact(PRESENCE_MODELS), _presence_sensor_profile),
+    ProfileSpec("contact_sensor", 210, _exact(CONTACT_MODELS), _contact_sensor_profile),
+    ProfileSpec("probe_sensor", 220, _exact(PROBE_MODELS), _probe_sensor_profile),
+    ProfileSpec("monitor_sensor", 230, _exact(MONITOR_MODELS), _monitor_sensor_profile),
+    ProfileSpec("thermo_sensor", 240, _exact(THERMO_MODELS), _thermo_sensor_profile),
+    ProfileSpec(
+        "unknown_sensor",
+        250,
+        lambda sku: sku in BUTTON_MODELS or sku in UNKNOWN_SENSOR_MODELS,
+        _unknown_sensor_profile,
+    ),
+    ProfileSpec("light_prefix", PRIORITY_PREFIX, is_light_sku, _light_prefix_profile),
+    ProfileSpec("generic", PRIORITY_FALLBACK, _matches_any, _generic_profile),
+)
 
 
 def profile_for(
@@ -311,255 +848,12 @@ def profile_for(
     """Build the profile for a model, using the cloud capability list if present."""
     sku = (sku or "").strip().upper()
 
-    if sku in CEILING_FAN_MODELS:
-        return DeviceProfile(
-            kind=KIND_CEILING_FAN,
-            features={
-                FEATURE_POWER,
-                FEATURE_FAN,
-                FEATURE_BRIGHTNESS,
-                FEATURE_COLOR,
-                FEATURE_COLOR_TEMP,
-            },
-            fan_speeds=FAN_SPEEDS.get(sku, 6),
-            model_name=sku,
-        )
-    if sku in FAN_MODELS:
-        features = {
-            FEATURE_POWER,
-            FEATURE_FAN,
-            FEATURE_OSCILLATION,
-        }
-        if sku in {"H7105", "H7107"}:
-            features.add(FEATURE_NIGHT_LIGHT)
-        return DeviceProfile(
-            kind=KIND_FAN,
-            features=features,
-            fan_speeds=FAN_SPEEDS.get(sku, 8),
-            model_name=sku,
-        )
-    if sku in HEATER1_MODELS:
-        return DeviceProfile(
-            kind=KIND_HEATER,
-            features={
-                FEATURE_POWER,
-                FEATURE_TARGET_TEMPERATURE,
-                FEATURE_TEMPERATURE,
-                FEATURE_FAN,
-                FEATURE_MODE,
-                FEATURE_LOCK,
-                FEATURE_OSCILLATION,
-            },
-            fan_speeds=3,
-            modes=("low", "medium", "high"),
-            model_name=sku,
-        )
-    if sku in HEATER2_MODELS:
-        return DeviceProfile(
-            kind=KIND_HEATER,
-            features={
-                FEATURE_POWER,
-                FEATURE_TARGET_TEMPERATURE,
-                FEATURE_TEMPERATURE,
-                FEATURE_FAN,
-                FEATURE_MODE,
-                FEATURE_NIGHT_LIGHT,
-                FEATURE_LOCK,
-                FEATURE_OSCILLATION,
-            },
-            fan_speeds=4,
-            modes=("fan-only", "low", "medium", "high"),
-            model_name=sku,
-        )
-    if sku in HUMIDIFIER_MODELS:
-        features: set[str] = {
-            FEATURE_POWER,
-            FEATURE_TARGET_HUMIDITY,
-            FEATURE_HUMIDITY,
-            FEATURE_MODE,
-            FEATURE_WATER_TANK,
-        }
-        # Only these models implement the 0x1B night light.
-        if sku in {"H7140", "H7142", "H7160"}:
-            features.add(FEATURE_NIGHT_LIGHT)
-        # Humidity decoding and automatic mode are known on the H7141/H7142.
-        if sku not in {"H7141", "H7142"}:
-            features -= {FEATURE_TARGET_HUMIDITY, FEATURE_HUMIDITY, FEATURE_MODE}
-        # The H7142 is the only humidifier with UVC.
-        if sku == "H7142":
-            features.add(FEATURE_UV)
-        return DeviceProfile(
-            kind=KIND_HUMIDIFIER,
-            features=frozenset(features),
-            fan_speeds=9 if sku in {"H7142", "H7160"} else 8,
-            modes=("manual", "auto", "program") if FEATURE_MODE in features else (),
-            model_name=sku,
-        )
-    if sku in PURIFIER_MODELS:
-        features: set[str] = {
-            FEATURE_POWER,
-            FEATURE_FAN,
-            FEATURE_FILTER,
-            FEATURE_DISPLAY,
-            FEATURE_LOCK,
-            FEATURE_NIGHT_LIGHT,
-            FEATURE_MODE,
-        }
-        # PM2.5 is decoded from AA 1C on the H7122; the H7123 reports a
-        # five-level air-quality enum instead.
-        if sku == "H7122":
-            features.add(FEATURE_PM25)
-        elif sku == "H7123":
-            features.add(FEATURE_AIR_QUALITY)
-        if sku in PURIFIER_3A_MODELS:
-            speeds = 5
-            modes = ("sleep", "low", "medium", "high", "auto")
-        elif sku in {"H7120", "H7121"}:
-            speeds = 4
-            modes = ("sleep", "low", "medium", "high")
-        else:
-            speeds = 3
-            modes = ("sleep", "low", "high")
-        return DeviceProfile(
-            kind=KIND_PURIFIER,
-            features=frozenset(features),
-            fan_speeds=speeds,
-            modes=modes,
-            model_name=sku,
-        )
-    if sku in DEHUMIDIFIER_MODELS:
-        return DeviceProfile(
-            kind=KIND_DEHUMIDIFIER,
-            features={
-                FEATURE_POWER,
-                FEATURE_TARGET_HUMIDITY,
-                FEATURE_HUMIDITY,
-                FEATURE_TEMPERATURE,
-                FEATURE_FAN,
-                FEATURE_MODE,
-                FEATURE_WATER_TANK,
-            },
-            fan_speeds=8,
-            modes=("low", "medium", "high", "auto"),
-            model_name=sku,
-        )
-    if sku in DIFFUSER_MODELS:
-        return DeviceProfile(
-            kind=KIND_DIFFUSER,
-            features={FEATURE_POWER},
-            model_name=sku,
-        )
-    if sku in ICE_MAKER_MODELS:
-        if sku in {"H8102", "H8131"}:
-            return DeviceProfile(
-                kind=KIND_ICE_MAKER,
-                features={FEATURE_POWER},
-                model_name=sku,
-            )
-        features = {FEATURE_POWER}
-        ice_sizes: tuple[str, ...] = ()
-        if sku != "H8120":
-            features.add(FEATURE_ICE_SIZE)
-            ice_sizes = ICE_SIZES
-        return DeviceProfile(
-            kind=KIND_ICE_MAKER,
-            features=features,
-            ice_sizes=ice_sizes,
-            model_name=sku,
-        )
-    if sku in KETTLE_MODELS:
-        return DeviceProfile(
-            kind=KIND_KETTLE,
-            features={
-                FEATURE_POWER,
-                FEATURE_TEMPERATURE,
-                FEATURE_MODE,
-            },
-            modes=("custom", "green_tea", "oolong_tea", "coffee", "black_tea"),
-            model_name=sku,
-        )
-    if sku in COMPOSTER_MODELS:
-        return DeviceProfile(
-            kind=KIND_COMPOSTER,
-            features={FEATURE_POWER},
-            model_name=sku,
-        )
-    if sku in TV_MODELS:
-        return DeviceProfile(
-            kind=KIND_TV,
-            features={FEATURE_POWER, FEATURE_BRIGHTNESS, FEATURE_COLOR, FEATURE_COLOR_TEMP},
-            model_name=sku,
-        )
+    for spec in PROFILE_REGISTRY:
+        if spec.matches(sku):
+            return spec.build(sku, support_cmds, properties)
 
-    if sku in SWITCH_TRIPLE_MODELS:
-        return DeviceProfile(
-            kind=KIND_SWITCH,
-            gang_count=3,
-            features={FEATURE_POWER},
-            model_name=sku,
-        )
-    if sku in SWITCH_DOUBLE_MODELS:
-        return DeviceProfile(
-            kind=KIND_SWITCH,
-            gang_count=2,
-            features={FEATURE_POWER},
-            model_name=sku,
-        )
-    if sku in SWITCH_SINGLE_MODELS:
-        on, off = POWER_OVERRIDES.get(sku, (1, 0))
-        return DeviceProfile(
-            kind=KIND_SWITCH,
-            features={FEATURE_POWER},
-            power_on=on,
-            power_off=off,
-            model_name=sku,
-        )
-
-    if sku in LEAK_MODELS:
-        return _sensor_profile(sku, KIND_LEAK, {FEATURE_LEAK})
-    if sku in CO2_MODELS:
-        return _sensor_profile(sku, KIND_CO2, {FEATURE_CO2, FEATURE_TEMPERATURE, FEATURE_HUMIDITY})
-    if sku in PRESENCE_MODELS:
-        return _sensor_profile(sku, KIND_PRESENCE, {FEATURE_PRESENCE})
-    if sku in CONTACT_MODELS:
-        return _sensor_profile(sku, KIND_CONTACT, {FEATURE_CONTACT})
-    if sku in PROBE_MODELS:
-        return _sensor_profile(sku, KIND_PROBE, {FEATURE_TEMPERATURE})
-    if sku in MONITOR_MODELS:
-        return _sensor_profile(sku, KIND_MONITOR, {FEATURE_TEMPERATURE, FEATURE_HUMIDITY})
-    if sku in THERMO_MODELS:
-        return _sensor_profile(sku, KIND_THERMO, {FEATURE_TEMPERATURE, FEATURE_HUMIDITY})
-    if sku in BUTTON_MODELS or sku in UNKNOWN_SENSOR_MODELS:
-        return _sensor_profile(sku, KIND_UNKNOWN, {FEATURE_BATTERY})
-
-    if is_light_sku(sku):
-        features = set(LIGHT_FEATURES)
-        # A cloud capability list is authoritative when the device provides one.
-        command_names = {str(command).lower() for command in support_cmds or []}
-        if command_names:
-            if not any("color" in command for command in command_names):
-                features.discard(FEATURE_COLOR)
-            if not any(
-                "colortem" in command or "color_tem" in command for command in command_names
-            ):
-                features.discard(FEATURE_COLOR_TEMP)
-        profile = _light_profile(sku, frozenset(features))
-        kelvin = (properties or {}).get("colorTem", {}).get("range", {})
-        if isinstance(kelvin, dict) and kelvin.get("min") and kelvin.get("max"):
-            profile = replace(
-                profile,
-                min_kelvin=int(kelvin["min"]),
-                max_kelvin=int(kelvin["max"]),
-            )
-        return profile
-
-    # Unknown devices still get power, which every appliance the reverse
-    # engineering work has seen accepts.
-    return DeviceProfile(
-        kind=KIND_SWITCH,
-        features={FEATURE_POWER},
-        model_name=sku,
-    )
+    # The generic rule matches every SKU, so this is unreachable.
+    raise AssertionError("profile registry is missing its catch-all rule")
 
 
 def sensor_keys(profile: DeviceProfile) -> tuple[str, ...]:
@@ -579,6 +873,8 @@ def sensor_keys(profile: DeviceProfile) -> tuple[str, ...]:
         keys.append("filter_life")
     if FEATURE_BATTERY in profile.features:
         keys.append("battery")
+    if FEATURE_POWER_METERING in profile.features:
+        keys.extend(("voltage", "current", "power_usage"))
     return tuple(keys)
 
 

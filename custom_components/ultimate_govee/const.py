@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-from datetime import timedelta
 from typing import Final
 
 DOMAIN: Final = "ultimate_govee"
@@ -46,8 +45,6 @@ PLATFORMS: Final = [
     "sensor",
     "switch",
 ]
-
-UPDATE_INTERVAL: Final = timedelta(seconds=DEFAULT_POLL_INTERVAL)
 
 # Cloud API endpoints (the same ones the Govee Home app uses).
 AUTH_URL: Final = "https://app2.govee.com/account/rest/account/v1/login"

@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import json
+import logging
 from typing import Any
 
+from ..models import DeviceState
 from ..profiles import (
     HEATER2_MODELS,
     KIND_CEILING_FAN,
@@ -32,10 +34,12 @@ from ..profiles import (
 )
 from .codec import ProtocolError, decode_frame, frames_from_command
 
+_LOGGER = logging.getLogger(__name__)
+
 LIGHT_KINDS = {KIND_LIGHT, KIND_TV, KIND_DIFFUSER}
 
 
-def decode_message(profile: DeviceProfile, payload: Any) -> dict[str, Any]:
+def decode_message(profile: DeviceProfile, payload: Any) -> DeviceState:
     """Decode one incoming AWS IoT or LAN message.
 
     Govee sends the same logical payload in several wrappers depending on the
@@ -62,9 +66,48 @@ def decode_message(profile: DeviceProfile, payload: Any) -> dict[str, Any]:
     if "battery" in message and result.get("battery") is None:
         result["battery"] = _as_int(message["battery"])
 
-    if profile.kind == KIND_CEILING_FAN and "zone_main" in result:
-        result.setdefault("power", bool(result["zone_main"]))
-    return result
+    return DeviceState.from_mapping(result)
+
+
+def decode_cloud_snapshot(
+    profile: DeviceProfile,
+    settings: dict[str, Any],
+    last: dict[str, Any],
+) -> DeviceState:
+    """Decode the cached snapshot in a cloud device listing.
+
+    This is a different payload shape from :func:`decode_message`: it carries
+    only the fields Govee caches for the account, not a live status report. It
+    shares the same field normalisers so brightness, temperature, and humidity
+    use the profile's units.
+    """
+    data: dict[str, Any] = {}
+    data["online"] = True if last.get("online") is None else _as_bool(last["online"])
+
+    if last.get("isOnOff") is not None:
+        data["power"] = _as_bool(last["isOnOff"])
+
+    brightness = _as_int(last.get("brightness"))
+    if brightness is not None:
+        data["brightness"] = _scale_brightness(profile, brightness)
+
+    temperature = _temperature(profile, last.get("tem"))
+    if temperature is not None:
+        data["temperature"] = temperature
+
+    humidity = _humidity(profile, last.get("hum"))
+    if humidity is not None:
+        data["humidity"] = humidity
+
+    battery = _as_int(settings.get("battery"))
+    if battery is not None:
+        data["battery"] = battery
+
+    filter_life = _as_int(settings.get("filterLife"))
+    if filter_life is not None:
+        data["filter_life"] = filter_life
+
+    return DeviceState.from_mapping(data)
 
 
 def _unwrap(payload: Any) -> dict[str, Any]:
@@ -336,11 +379,18 @@ def _decode_frame(
             if profile.fan_speeds:
                 result["percentage"] = round(payload[1] * 100 / profile.fan_speeds)
     elif register == 0x36 and payload:
-        result["zone_main"] = payload[0] != 0
-        if len(payload) > 1:
-            result["zone_background"] = payload[1] != 0
         if kind == KIND_CEILING_FAN:
+            # The first byte reports whether the main zone is powered. Keep
+            # any power already reported by another frame in the same message.
+            result.setdefault("power", payload[0] != 0)
             result["night_light"] = payload[0] != 0
+        else:
+            _LOGGER.debug(
+                "Unhandled 0x36 frame for %s (%s): %s",
+                profile.model_name,
+                kind,
+                payload.hex(),
+            )
 
 
 def _decode_humidity_frame(payload: bytes, result: dict[str, Any]) -> None:
@@ -401,7 +451,6 @@ def _decode_register_05(profile: DeviceProfile, payload: bytes, result: dict[str
             result["fan_speed"] = payload[1]
     elif kind == KIND_ICE_MAKER:
         index = sub if sub <= 3 else payload[-1]
-        result["ice_size_index"] = index
         sizes = profile.ice_sizes or ("small", "medium", "large")
         size_index = index - 1 if profile.model_name in {"H8121", "H8122"} else len(sizes) - index
         if 0 <= size_index < len(sizes):
@@ -409,7 +458,12 @@ def _decode_register_05(profile: DeviceProfile, payload: bytes, result: dict[str
     elif kind == KIND_KETTLE:
         result["mode"] = str(sub)
     else:
-        result["extra_frame_05"] = payload.hex()
+        _LOGGER.debug(
+            "Unhandled 0x05 frame for %s (%s): %s",
+            profile.model_name,
+            kind,
+            payload.hex(),
+        )
 
 
 def _decode_heater_speed(profile: DeviceProfile, payload: bytes, result: dict[str, Any]) -> None:

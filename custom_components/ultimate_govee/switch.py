@@ -12,47 +12,17 @@ from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
 from .coordinator import GoveeCoordinator
 from .entity import GoveeEntity
+from .entity_plan import PLATFORM_SWITCH, entities_for_platform
 from .profiles import (
     FEATURE_DISPLAY,
     FEATURE_LOCK,
     FEATURE_NIGHT_LIGHT,
     FEATURE_OSCILLATION,
     FEATURE_UV,
-    KIND_CEILING_FAN,
-    KIND_COMPOSTER,
-    KIND_DIFFUSER,
-    KIND_FAN,
     KIND_HEATER,
-    KIND_HUMIDIFIER,
     KIND_ICE_MAKER,
-    KIND_KETTLE,
-    KIND_PURIFIER,
-    KIND_SWITCH,
-    KIND_TV,
 )
 from .protocol import commands
-
-POWER_KINDS = {
-    KIND_COMPOSTER,
-    KIND_DIFFUSER,
-    KIND_HEATER,
-    KIND_ICE_MAKER,
-    KIND_KETTLE,
-    KIND_SWITCH,
-    KIND_TV,
-}
-CONTROL_KINDS = {
-    KIND_CEILING_FAN,
-    KIND_COMPOSTER,
-    KIND_DIFFUSER,
-    KIND_FAN,
-    KIND_HEATER,
-    KIND_HUMIDIFIER,
-    KIND_ICE_MAKER,
-    KIND_KETTLE,
-    KIND_PURIFIER,
-    KIND_TV,
-}
 
 
 async def async_setup_entry(
@@ -64,31 +34,16 @@ async def async_setup_entry(
     coordinator: GoveeCoordinator = entry.runtime_data
     entities: list[GoveeSwitch] = []
     for device in coordinator.devices.values():
-        profile = device.profile
-        if profile.kind not in POWER_KINDS and profile.kind not in CONTROL_KINDS:
-            continue
-        if profile.kind == KIND_SWITCH and profile.gang_count > 1:
-            entities.extend(
-                GoveeSwitch(coordinator, device.device_id, f"gang{index}", name)
-                for index, name in enumerate(
-                    f"Gang {number}" for number in range(1, profile.gang_count + 1)
-                )
+        entities.extend(
+            GoveeSwitch(
+                coordinator,
+                device.device_id,
+                spec.key,
+                spec.name,
+                entity_category=spec.entity_category,
             )
-        elif profile.kind in POWER_KINDS:
-            entities.append(GoveeSwitch(coordinator, device.device_id, "power"))
-
-        if profile.kind not in CONTROL_KINDS:
-            continue
-        for feature, name in (
-            (FEATURE_NIGHT_LIGHT, "Night light"),
-            (FEATURE_DISPLAY, "Display"),
-            (FEATURE_LOCK, "Child lock"),
-            (FEATURE_UV, "UV sterilisation"),
-            (FEATURE_OSCILLATION, "Oscillation"),
-        ):
-            if feature in profile.features:
-                entities.append(GoveeSwitch(coordinator, device.device_id, feature, name))
-
+            for spec in entities_for_platform(device.profile, PLATFORM_SWITCH)
+        )
     async_add_entities(entities)
 
 
@@ -103,12 +58,13 @@ class GoveeSwitch(GoveeEntity, SwitchEntity):
         device_id: str,
         key: str,
         name: str | None = None,
+        *,
+        entity_category: EntityCategory | None = None,
     ) -> None:
         super().__init__(coordinator, device_id, key)
         self._key = key
         self._attr_name = name
-        if key in {FEATURE_DISPLAY, FEATURE_LOCK, FEATURE_UV}:
-            self._attr_entity_category = EntityCategory.CONFIG
+        self._attr_entity_category = entity_category
 
     @property
     def is_on(self) -> bool:

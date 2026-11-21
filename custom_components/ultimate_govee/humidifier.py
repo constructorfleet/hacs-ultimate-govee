@@ -14,10 +14,10 @@ from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
 from .coordinator import GoveeCoordinator
 from .entity import GoveeEntity
+from .entity_plan import PLATFORM_HUMIDIFIER, entities_for_platform
 from .profiles import (
     FEATURE_MODE,
     FEATURE_TARGET_HUMIDITY,
-    KIND_HUMIDIFIER,
 )
 from .protocol import commands
 
@@ -30,9 +30,9 @@ async def async_setup_entry(
     """Set up humidifier entities."""
     coordinator: GoveeCoordinator = entry.runtime_data
     async_add_entities(
-        GoveeHumidifier(coordinator, device.device_id)
+        GoveeHumidifier(coordinator, device.device_id, spec.key)
         for device in coordinator.devices.values()
-        if device.profile.kind == KIND_HUMIDIFIER
+        for spec in entities_for_platform(device.profile, PLATFORM_HUMIDIFIER)
     )
 
 
@@ -42,8 +42,13 @@ class GoveeHumidifier(GoveeEntity, HumidifierEntity):
     _attr_min_humidity = 1
     _attr_max_humidity = 100
 
-    def __init__(self, coordinator: GoveeCoordinator, device_id: str) -> None:
-        super().__init__(coordinator, device_id, "humidifier")
+    def __init__(
+        self,
+        coordinator: GoveeCoordinator,
+        device_id: str,
+        key: str = "humidifier",
+    ) -> None:
+        super().__init__(coordinator, device_id, key)
         profile = self.device.profile
         features = HumidifierEntityFeature(0)
         if FEATURE_MODE in profile.features and profile.modes:

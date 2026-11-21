@@ -37,6 +37,8 @@ class WireCommand:
     data: dict[str, Any] = field(default_factory=dict)
     lan_cmd: str | None = None
     lan_data: dict[str, Any] | None = None
+    cmd_version: int = 0
+    msg_type: int = 1
 
     def aws_payload(self) -> tuple[str, dict[str, Any]]:
         """Return the AWS command name and data."""

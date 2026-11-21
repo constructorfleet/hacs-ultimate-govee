@@ -2,10 +2,8 @@
 
 from __future__ import annotations
 
-import logging
 from typing import Any
 
-import aiohttp
 from homeassistant.components.light import (
     ATTR_BRIGHTNESS,
     ATTR_COLOR_TEMP_KELVIN,
@@ -18,13 +16,10 @@ from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
-from .api.cloud import GoveeApiError
 from .coordinator import GoveeCoordinator
 from .entity import GoveeEntity
-from .profiles import KIND_LIGHT
+from .entity_plan import PLATFORM_LIGHT, entities_for_platform
 from .protocol import commands
-
-_LOGGER = logging.getLogger(__name__)
 
 
 async def async_setup_entry(
@@ -35,17 +30,22 @@ async def async_setup_entry(
     """Set up light entities."""
     coordinator: GoveeCoordinator = entry.runtime_data
     async_add_entities(
-        GoveeLight(coordinator, device.device_id)
+        GoveeLight(coordinator, device.device_id, spec.key)
         for device in coordinator.devices.values()
-        if device.profile.kind == KIND_LIGHT
+        for spec in entities_for_platform(device.profile, PLATFORM_LIGHT)
     )
 
 
 class GoveeLight(GoveeEntity, LightEntity):
     """A dimmable, colour-capable Govee light."""
 
-    def __init__(self, coordinator: GoveeCoordinator, device_id: str) -> None:
-        super().__init__(coordinator, device_id, "light")
+    def __init__(
+        self,
+        coordinator: GoveeCoordinator,
+        device_id: str,
+        key: str = "light",
+    ) -> None:
+        super().__init__(coordinator, device_id, key)
         profile = self.device.profile
         modes: set[ColorMode] = set()
         if profile.supports_color:
@@ -98,12 +98,10 @@ class GoveeLight(GoveeEntity, LightEntity):
     @property
     def effect_list(self) -> list[str] | None:
         """Return the names of the device's effects."""
-        if not self.coordinator.enable_effects:
-            return None
-        effects = self.coordinator.effects.get(self.device.sku)
+        effects = self.coordinator.effects_library.effects(self.device)
         if not effects:
             return None
-        return [str(effect.get("name")) for effect in effects if effect.get("name")]
+        return [effect.name for effect in effects]
 
     @property
     def effect(self) -> str | None:
@@ -113,18 +111,10 @@ class GoveeLight(GoveeEntity, LightEntity):
     async def async_added_to_hass(self) -> None:
         """Load the effect library once the entity exists."""
         await super().async_added_to_hass()
-        if (
-            self._effects_loaded
-            or not self.coordinator.enable_effects
-            or not self.device.profile.supports_color
-        ):
+        if self._effects_loaded or not self.device.profile.supports_color:
             return
         self._effects_loaded = True
-        try:
-            await self.coordinator.async_get_effects(self.device)
-        except (GoveeApiError, aiohttp.ClientError, OSError) as err:
-            _LOGGER.debug("Unable to load effects for %s: %s", self.device.name, err)
-            return
+        await self.coordinator.effects_library.async_load(self.device)
         self.async_write_ha_state()
 
     async def async_turn_on(self, **kwargs: Any) -> None:
@@ -154,16 +144,20 @@ class GoveeLight(GoveeEntity, LightEntity):
             await self._async_set_effect(str(kwargs[ATTR_EFFECT]))
 
     async def _async_set_effect(self, name: str) -> None:
-        effects = self.coordinator.effects.get(self.device.sku, [])
-        effect = next((item for item in effects if str(item.get("name")) == name), None)
+        effect = next(
+            (
+                item
+                for item in self.coordinator.effects_library.effects(self.device)
+                if item.name == name
+            ),
+            None,
+        )
         if effect is None:
             return
-        frames = effect.get("opCode") or effect.get("code")
-        if isinstance(frames, str):
-            frames = [frames]
-        if not isinstance(frames, list):
-            return
-        await self._send(commands.effect(frames), {"effect": name, "power": True})
+        await self._send(
+            commands.effect(list(effect.frames)),
+            {"effect": name, "power": True},
+        )
 
     async def async_turn_off(self, **kwargs: Any) -> None:
         """Turn the light off."""

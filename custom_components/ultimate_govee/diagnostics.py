@@ -40,12 +40,14 @@ async def async_get_config_entry_diagnostics(
 ) -> dict[str, Any]:
     """Return diagnostics for a config entry."""
     coordinator: GoveeCoordinator = entry.runtime_data
+    transports = coordinator.transport_status()
     return {
         "data": _redact(dict(entry.data)),
-        "options": dict(entry.options),
+        "options": coordinator.govee_options.as_dict(),
+        "transports": transports,
         "iot": {
             "enabled": coordinator.enable_iot,
-            "connected": bool(coordinator._iot and coordinator._iot.connected),
+            "connected": transports["cloud_mqtt"]["connected"],
         },
         "lan": {
             "enabled": coordinator.enable_lan,
