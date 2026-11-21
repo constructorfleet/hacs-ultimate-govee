@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.3.0](https://github.com/constructorfleet/hacs-ultimate-govee/compare/v0.2.0...v0.3.0) (2026-11-21)
+
+
+### Features
+
+* add BLE GATT transport ([#5](https://github.com/constructorfleet/hacs-ultimate-govee/issues/5)) ([4958922](https://github.com/constructorfleet/hacs-ultimate-govee/commit/495892291a9ee99f86ff6590a1bbd3210505f54d))
+
 ## [0.2.0](https://github.com/constructorfleet/hacs-ultimate-govee/compare/v0.1.1...v0.2.0) (2026-11-21)
 
 
