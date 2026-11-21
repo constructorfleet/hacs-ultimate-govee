@@ -5,6 +5,7 @@ from __future__ import annotations
 from typing import Any
 
 from custom_components.ultimate_govee.fleet import Fleet
+from custom_components.ultimate_govee.models import DeviceState
 
 
 def _raw(
@@ -163,3 +164,75 @@ def test_profile_is_fixed_for_the_entry_lifetime() -> None:
     fleet.reconcile([_raw("device-1", sku="H7120")])
 
     assert device.profile is profile
+
+
+def test_observe_lan_notifies_once_and_records_the_endpoint() -> None:
+    fleet = Fleet()
+    fleet.reconcile([_raw("device-1")])
+    calls: list[int] = []
+    fleet.add_listener(lambda: calls.append(1))
+
+    assert fleet.observe_lan("device-1", "192.168.1.20", 5.0) is True
+    assert fleet.observe_lan("device-1", "192.168.1.20", 5.0) is False
+
+    device = fleet.get("device-1")
+    assert device is not None
+    assert device.lan_ip == "192.168.1.20"
+    assert device.lan_last_seen == 5.0
+    assert device.state.online is True
+    assert calls == [1]
+
+
+def test_apply_report_notifies_once_for_state_and_endpoint() -> None:
+    fleet = Fleet()
+    fleet.reconcile([_raw("device-1")])
+    calls: list[int] = []
+    fleet.add_listener(lambda: calls.append(1))
+
+    changed = fleet.apply_report(
+        "device-1",
+        DeviceState(power=True, brightness=40),
+        ip="192.168.1.20",
+        seen_at=6.0,
+    )
+
+    device = fleet.get("device-1")
+    assert changed is True
+    assert calls == [1]
+    assert device is not None
+    assert device.lan_ip == "192.168.1.20"
+    assert device.state.online is True
+    assert device.state.power is True
+    assert device.state.brightness == 40
+
+
+def test_mark_lan_failed_notifies_endpoint_loss() -> None:
+    fleet = Fleet()
+    fleet.reconcile([_raw("device-1")])
+    device = fleet.get("device-1")
+    assert device is not None
+    fleet.observe_lan("device-1", "192.168.1.20", 5.0)
+    calls: list[int] = []
+    fleet.add_listener(lambda: calls.append(1))
+
+    assert fleet.mark_lan_failed("device-1") is True
+    assert fleet.mark_lan_failed("device-1") is False
+
+    assert device.lan_ip is None
+    assert device.lan_last_seen == 0.0
+    assert calls == [1]
+
+
+def test_refresh_notifies_once_for_multiple_transitions() -> None:
+    fleet = Fleet()
+    fleet.reconcile([_raw("device-1")])
+    calls: list[int] = []
+    fleet.add_listener(lambda: calls.append(1))
+
+    fleet.refresh([_raw("device-2")])
+
+    first = fleet.get("device-1")
+    assert first is not None
+    assert first.state.online is False
+    assert fleet.get("device-2") is not None
+    assert calls == [1]

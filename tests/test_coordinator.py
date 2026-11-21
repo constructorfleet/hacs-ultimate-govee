@@ -16,7 +16,9 @@ from custom_components.ultimate_govee.coordinator import GoveeCoordinator
 from custom_components.ultimate_govee.fleet import Fleet
 from custom_components.ultimate_govee.models import DeviceState, GoveeDevice
 from custom_components.ultimate_govee.profiles import profile_for
+from custom_components.ultimate_govee.protocol.codec import build_frame, bytes_to_base64
 from custom_components.ultimate_govee.tap_to_runs import TapAction, TapToRun
+from custom_components.ultimate_govee.transport import StatusReport, TransportKind
 
 
 def _raw(device_id: str, name: str) -> dict[str, Any]:
@@ -78,8 +80,9 @@ async def test_tap_to_run_publishes_to_device(hass: Any, tmp_path: Path) -> None
         ]
     )
     iot = Mock(connected=True)
-    coordinator._iot = iot
-    coordinator._iot_started = True
+    cloud = coordinator.router.get(TransportKind.CLOUD_MQTT)
+    assert cloud is not None
+    cloud._iot = iot  # type: ignore[attr-defined]
     tap = TapToRun(
         name="Party",
         key="party",
@@ -144,7 +147,9 @@ async def test_inbound_status_marks_device_online(hass: Any, tmp_path: Path) -> 
     """A live status report proves the device is reachable."""
     coordinator, device = _coordinator_with_device(hass, tmp_path)
 
-    coordinator._handle_iot_message({"device": "device-1", "state": {"onOff": 1}})
+    cloud = coordinator.router.get(TransportKind.CLOUD_MQTT)
+    assert cloud is not None
+    cloud._handle_message({"device": "device-1", "state": {"onOff": 1}})  # type: ignore[attr-defined]
 
     assert device.state.power is True
     assert device.state.online is True
@@ -154,7 +159,9 @@ async def test_lan_devstatus_records_endpoint(hass: Any, tmp_path: Path) -> None
     """A status report also proves the device is reachable over LAN."""
     coordinator, device = _coordinator_with_device(hass, tmp_path)
 
-    coordinator._handle_lan_message(
+    lan = coordinator.router.get(TransportKind.LAN_UDP)
+    assert lan is not None
+    lan._handle_message(  # type: ignore[attr-defined]
         "device-1", "devStatus", {"state": {"onOff": 1}}, "192.168.1.20"
     )
 
@@ -183,3 +190,67 @@ async def test_tap_to_run_reports_delivery_failure(hass: Any, tmp_path: Path) ->
 
     with pytest.raises(GoveeApiError, match="No transport delivered the Party tap-to-run"):
         await coordinator.async_run_tap_to_run(tap)
+
+
+async def test_coordinator_lifecycle_delegates_to_the_router(hass: Any, tmp_path: Path) -> None:
+    """The coordinator starts and stops the router, never concrete adapters."""
+    coordinator, _ = _coordinator_with_device(hass, tmp_path)
+    coordinator.auth.ensure_valid = AsyncMock()  # type: ignore[method-assign]
+    calls: list[str] = []
+
+    class RouterStub:
+        async def async_start(self) -> None:
+            calls.append("start")
+
+        async def async_stop(self) -> None:
+            calls.append("stop")
+
+    coordinator.router = RouterStub()  # type: ignore[assignment]
+
+    await coordinator.async_setup()
+    await coordinator.async_shutdown()
+
+    assert calls == ["start", "stop"]
+
+
+async def test_fleet_changes_notify_coordinator_listeners(hass: Any, tmp_path: Path) -> None:
+    """A fleet observation is the single path to entity listeners."""
+    coordinator, device = _coordinator_with_device(hass, tmp_path)
+    calls: list[int] = []
+    coordinator.async_update_listeners = Mock(  # type: ignore[method-assign]
+        side_effect=lambda: calls.append(1)
+    )
+
+    assert coordinator.fleet.observe_lan("device-1", "192.168.1.20", 5.0)
+    assert coordinator.fleet.observe_lan("device-1", "192.168.1.20", 5.0) is False
+
+    assert calls == [1]
+    assert device.lan_ip == "192.168.1.20"
+
+
+async def test_ble_status_report_is_applied_by_the_coordinator(hass: Any, tmp_path: Path) -> None:
+    """A BLE notification crosses the same typed event seam as cloud and LAN."""
+    coordinator, device = _coordinator_with_device(hass, tmp_path)
+    frame = build_frame(0x01, [1], opcode=0xAA)
+
+    coordinator._handle_inbound(
+        StatusReport("device-1", {"op": {"command": [bytes_to_base64(frame)]}})
+    )
+
+    assert device.state.power is True
+    assert device.state.online is True
+
+
+async def test_refresh_publishes_one_listener_notification(hass: Any, tmp_path: Path) -> None:
+    """A refresh does not notify once per Fleet step and once for its result."""
+    coordinator, _ = _coordinator_with_device(hass, tmp_path)
+    coordinator.auth.ensure_valid = AsyncMock()  # type: ignore[method-assign]
+    coordinator.cloud.get_devices = AsyncMock(  # type: ignore[method-assign]
+        return_value=[_raw("device-1", "One"), _raw("device-2", "Two")]
+    )
+    coordinator.async_update_listeners = Mock()  # type: ignore[method-assign]
+
+    await coordinator._async_update_data()
+
+    coordinator.async_update_listeners.assert_not_called()
+    assert set(coordinator.devices) == {"device-1", "device-2"}

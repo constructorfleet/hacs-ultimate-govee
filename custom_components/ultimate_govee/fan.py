@@ -18,13 +18,18 @@ from homeassistant.util.percentage import (
 
 from .coordinator import GoveeCoordinator
 from .entity import GoveeEntity
-from .entity_plan import PLATFORM_FAN, entities_for_platform
-from .profiles import (
-    KIND_DEHUMIDIFIER,
-    KIND_FAN,
-    KIND_PURIFIER,
+from .entity_plan import (
+    FAN_OPERATION_MODE,
+    FAN_OPERATION_OSCILLATE,
+    FAN_OPERATION_POWER,
+    FAN_OPERATION_SPEED,
+    PLATFORM_FAN,
+    ControlContext,
+    ControlResult,
+    EntitySpec,
+    entities_for_platform,
 )
-from .protocol import commands
+from .profiles import KIND_FAN
 
 
 async def async_setup_entry(
@@ -35,7 +40,7 @@ async def async_setup_entry(
     """Set up fan entities."""
     coordinator: GoveeCoordinator = entry.runtime_data
     async_add_entities(
-        GoveeFan(coordinator, device.device_id, spec.key)
+        GoveeFan(coordinator, device.device_id, spec)
         for device in coordinator.devices.values()
         for spec in entities_for_platform(device.profile, PLATFORM_FAN)
     )
@@ -48,9 +53,10 @@ class GoveeFan(GoveeEntity, FanEntity):
         self,
         coordinator: GoveeCoordinator,
         device_id: str,
-        key: str = "fan",
+        spec: EntitySpec,
     ) -> None:
-        super().__init__(coordinator, device_id, key)
+        super().__init__(coordinator, device_id, spec.key)
+        self._spec = spec
         profile = self.device.profile
         self._speeds = tuple(str(speed) for speed in range(1, profile.fan_speeds + 1))
         features = FanEntityFeature.SET_SPEED
@@ -97,7 +103,8 @@ class GoveeFan(GoveeEntity, FanEntity):
     ) -> None:
         """Turn the fan on, optionally at a speed or preset."""
         speed = self._percentage_to_level(percentage)
-        await self._send(self._power_command(True, speed), {"power": True})
+        result = self._control(FAN_OPERATION_POWER, True, speed=speed)
+        await self._send(result.command, dict(result.optimistic))
         if preset_mode is not None:
             await self.async_set_preset_mode(preset_mode)
         elif percentage is not None:
@@ -106,48 +113,46 @@ class GoveeFan(GoveeEntity, FanEntity):
     async def async_turn_off(self, **kwargs: Any) -> None:
         """Turn the fan off."""
         speed = self._percentage_to_level(self.percentage)
-        await self._send(self._power_command(False, speed), {"power": False})
+        result = self._control(FAN_OPERATION_POWER, False, speed=speed)
+        await self._send(result.command, dict(result.optimistic))
 
     async def async_set_percentage(self, percentage: int) -> None:
         """Set the fan speed."""
-        profile = self.device.profile
         if percentage <= 0:
             await self.async_turn_off()
             return
-        if profile.kind == KIND_PURIFIER:
-            command = commands.purifier_speed(profile, percentage)
-        else:
-            command = commands.fan_speed(profile, self._percentage_to_level(percentage))
-        await self._send(
-            command,
-            {"percentage": percentage, "fan_speed": self._percentage_to_level(percentage)},
-        )
+        result = self._control(FAN_OPERATION_SPEED, percentage)
+        await self._send(result.command, dict(result.optimistic))
 
     async def async_set_preset_mode(self, preset_mode: str) -> None:
         """Select a work mode."""
-        profile = self.device.profile
-        if profile.kind == KIND_PURIFIER:
-            command = commands.purifier_mode(profile, preset_mode)
-        elif profile.kind == KIND_DEHUMIDIFIER:
-            command = commands.dehumidifier_mode(profile, preset_mode)
-        else:
-            command = commands.fan_mode(profile, preset_mode)
-        await self._send(command, {"mode": preset_mode, "power": True})
+        result = self._control(FAN_OPERATION_MODE, preset_mode)
+        await self._send(result.command, dict(result.optimistic))
 
     async def async_oscillate(self, oscillating: bool) -> None:
         """Turn oscillation on or off."""
         if "oscillation" not in self.device.profile.features:
             return
-        await self._send(
-            commands.oscillation(self.device.profile, oscillating),
-            {"oscillation": oscillating},
-        )
+        result = self._control(FAN_OPERATION_OSCILLATE, oscillating)
+        await self._send(result.command, dict(result.optimistic))
 
-    def _power_command(self, on: bool, speed: int) -> commands.Command:
-        profile = self.device.profile
-        if profile.kind in {KIND_PURIFIER, KIND_DEHUMIDIFIER}:
-            return commands.power(profile, on)
-        return commands.fan_power(profile, on, speed)
+    def _control(
+        self,
+        operation: str,
+        value: Any,
+        **parameters: Any,
+    ) -> ControlResult:
+        if self._spec.control is None:
+            raise ValueError("The fan plan has no control")
+        return self._spec.control(
+            ControlContext(
+                self.device.profile,
+                self.device.state,
+                value,
+                operation=operation,
+                parameters=parameters,
+            )
+        )
 
     def _percentage_to_level(self, percentage: int | None) -> int:
         """Map a percentage to a 1-based speed level."""

@@ -5,11 +5,11 @@ from __future__ import annotations
 import json
 import logging
 import re
-from collections.abc import ItemsView, Iterable, Iterator, Mapping, ValuesView
+from collections.abc import Callable, ItemsView, Iterable, Iterator, Mapping, ValuesView
 from types import MappingProxyType
 from typing import Any
 
-from .models import GoveeDevice
+from .models import DeviceState, GoveeDevice
 from .profiles import profile_for
 from .protocol.state import decode_cloud_snapshot
 
@@ -32,14 +32,40 @@ _BLE_NAME_FIELDS = ("bleName",)
 class Fleet:
     """The devices currently known to one config entry.
 
-    The fleet owns device identity and the cloud-to-device mapping. It never
-    talks to Home Assistant, the cloud client, or a transport; the coordinator
-    supplies raw cloud payloads and decides when to poll.
+    The fleet owns device identity, observation and the cloud-to-device
+    mapping. It never talks to Home Assistant, the cloud client, or a
+    transport; the coordinator supplies raw cloud payloads, reports typed
+    observations, and listens for changes.
     """
 
     def __init__(self, devices: Iterable[GoveeDevice] = ()) -> None:
         self._devices: dict[str, GoveeDevice] = {device.device_id: device for device in devices}
         self._view: Mapping[str, GoveeDevice] = MappingProxyType(self._devices)
+        self._listeners: list[Callable[[], None]] = []
+        self._batch_depth = 0
+        self._pending_notification = False
+
+    def add_listener(self, listener: Callable[[], None]) -> None:
+        """Register a callback for any device change."""
+        if listener not in self._listeners:
+            self._listeners.append(listener)
+
+    def remove_listener(self, listener: Callable[[], None]) -> None:
+        """Stop notifying ``listener``."""
+        if listener in self._listeners:
+            self._listeners.remove(listener)
+
+    def _notify(self) -> None:
+        if self._batch_depth:
+            self._pending_notification = True
+            return
+        for listener in tuple(self._listeners):
+            listener()
+
+    def _flush(self) -> None:
+        if self._batch_depth == 0 and self._pending_notification:
+            self._pending_notification = False
+            self._notify()
 
     @property
     def by_id(self) -> Mapping[str, GoveeDevice]:
@@ -81,6 +107,7 @@ class Fleet:
                 if device_id not in removed
             }
             self._view = MappingProxyType(self._devices)
+            self._notify()
         return removed
 
     def reconcile(
@@ -98,6 +125,7 @@ class Fleet:
         ignored_ids = {str(device_id) for device_id in ignored}
         next_devices: dict[str, GoveeDevice] = {}
         seen: set[str] = set()
+        changed = False
 
         for raw in raw_devices:
             if not isinstance(raw, Mapping):
@@ -109,8 +137,9 @@ class Fleet:
             device = self._devices.get(device_id)
             if device is None:
                 device = _build_device(device_id, dict(raw))
+                changed = True
             else:
-                _update_device_metadata(device, dict(raw))
+                changed = _update_device_metadata(device, dict(raw)) or changed
             next_devices[device_id] = device
 
         for device_id, device in self._devices.items():
@@ -120,13 +149,110 @@ class Fleet:
 
         self._devices = next_devices
         self._view = MappingProxyType(next_devices)
+        if changed:
+            self._notify()
+        return seen
+
+    def refresh(
+        self,
+        raw_devices: Iterable[Mapping[str, Any]],
+        *,
+        ignored: Iterable[str] = (),
+    ) -> set[str]:
+        """Prune, reconcile and reconcile reachability as one notification.
+
+        The coordinator uses this so one cloud refresh produces one listener
+        notification instead of one per internal step.
+        """
+        self._batch_depth += 1
+        try:
+            removed = self.prune(ignored)
+            if removed:
+                _LOGGER.debug("Removed ignored devices from the fleet: %s", sorted(removed))
+            seen = self.reconcile(raw_devices, ignored=ignored)
+            self.reconcile_seen(seen)
+        finally:
+            self._batch_depth -= 1
+            self._flush()
         return seen
 
     def reconcile_seen(self, seen: set[str]) -> None:
         """Mark devices absent from the cloud listing offline unless on LAN."""
+        changed = False
         for device_id, device in self._devices.items():
-            if device_id not in seen and not device.lan_reachable:
+            if (
+                device_id not in seen
+                and not device.lan_reachable
+                and device.state.online is not False
+            ):
                 device.state.online = False
+                changed = True
+        if changed:
+            self._notify()
+
+    def observe_lan(self, device_id: str, ip: str, seen_at: float) -> bool:
+        """Record that ``device_id`` answered on the LAN."""
+        device = self._devices.get(device_id)
+        if device is None:
+            return False
+        changed = _observe_lan(device, ip, seen_at)
+        if changed:
+            self._notify()
+        return changed
+
+    def mark_lan_failed(self, device_id: str) -> bool:
+        """Forget a LAN endpoint that did not accept a command."""
+        device = self._devices.get(device_id)
+        if device is None:
+            return False
+        if device.lan_ip is None and device.lan_last_seen == 0.0:
+            return False
+        device.lan_ip = None
+        device.lan_last_seen = 0.0
+        self._notify()
+        return True
+
+    def apply_state(self, device_id: str, state: DeviceState | Mapping[str, Any]) -> bool:
+        """Merge a decoded or optimistic state into one device."""
+        device = self._devices.get(device_id)
+        if device is None:
+            return False
+        if not isinstance(state, DeviceState):
+            state = DeviceState.from_mapping(state)
+        changed = device.state.merge_from(state)
+        if changed:
+            self._notify()
+        return changed
+
+    def apply_report(
+        self,
+        device_id: str,
+        state: DeviceState,
+        *,
+        ip: str | None = None,
+        seen_at: float | None = None,
+    ) -> bool:
+        """Apply one report and its optional endpoint proof as one change."""
+        device = self._devices.get(device_id)
+        if device is None:
+            return False
+        changed = False
+        if ip is not None:
+            changed = _observe_lan(device, ip, seen_at or 0.0)
+        changed = device.state.merge_from(state) or changed
+        if changed:
+            self._notify()
+        return changed
+
+
+def _observe_lan(device: GoveeDevice, ip: str, seen_at: float) -> bool:
+    changed = (
+        device.lan_ip != ip or device.lan_last_seen != seen_at or device.state.online is not True
+    )
+    device.lan_ip = ip
+    device.lan_last_seen = seen_at
+    device.state.online = True
+    return changed
 
 
 def _build_device(device_id: str, raw: dict[str, Any]) -> GoveeDevice:
@@ -156,13 +282,13 @@ def _build_device(device_id: str, raw: dict[str, Any]) -> GoveeDevice:
     return device
 
 
-def _update_device_metadata(device: GoveeDevice, raw: dict[str, Any]) -> None:
+def _update_device_metadata(device: GoveeDevice, raw: dict[str, Any]) -> bool:
     ext = raw.get("deviceExt")
     ext = ext if isinstance(ext, dict) else {}
     settings = _parse_json(ext.get("deviceSettings"))
     last = _parse_json(ext.get("lastDeviceData"))
     if not settings:
-        return
+        return False
     if (
         device.raw_settings
         and not device.profile_inputs_warned
@@ -174,6 +300,15 @@ def _update_device_metadata(device: GoveeDevice, raw: dict[str, Any]) -> None:
             device.sku,
         )
         device.profile_inputs_warned = True
+    previous = (
+        device.settings,
+        device.raw_settings,
+        device.iot_topic,
+        device.firmware,
+        device.hardware,
+        device.name,
+        device.ble_address,
+    )
     device.settings = settings
     device.raw_settings = raw
     device.iot_topic = settings.get("topic") or device.iot_topic
@@ -181,6 +316,16 @@ def _update_device_metadata(device: GoveeDevice, raw: dict[str, Any]) -> None:
     device.hardware = settings.get("versionHard") or device.hardware
     device.name = str(raw.get("deviceName") or settings.get("deviceName") or device.name)
     device.ble_address = _ble_address(raw, ext, settings, last) or device.ble_address
+    current = (
+        device.settings,
+        device.raw_settings,
+        device.iot_topic,
+        device.firmware,
+        device.hardware,
+        device.name,
+        device.ble_address,
+    )
+    return previous != current
 
 
 def _ble_address(*sources: Any) -> str | None:

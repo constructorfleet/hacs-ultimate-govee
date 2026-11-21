@@ -9,8 +9,7 @@ from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
 from .coordinator import GoveeCoordinator
 from .entity import GoveeEntity
-from .entity_plan import PLATFORM_SELECT, entities_for_platform
-from .protocol import commands
+from .entity_plan import PLATFORM_SELECT, ControlContext, EntitySpec, entities_for_platform
 
 
 async def async_setup_entry(
@@ -23,13 +22,7 @@ async def async_setup_entry(
     entities: list[GoveeSelect] = []
     for device in coordinator.devices.values():
         entities.extend(
-            GoveeSelect(
-                coordinator,
-                device.device_id,
-                spec.key,
-                spec.name or spec.key,
-                list(spec.options),
-            )
+            GoveeSelect(coordinator, device.device_id, spec)
             for spec in entities_for_platform(device.profile, PLATFORM_SELECT)
         )
     async_add_entities(entities)
@@ -42,14 +35,13 @@ class GoveeSelect(GoveeEntity, SelectEntity):
         self,
         coordinator: GoveeCoordinator,
         device_id: str,
-        key: str,
-        name: str,
-        options: list[str],
+        spec: EntitySpec,
     ) -> None:
-        super().__init__(coordinator, device_id, key)
-        self._key = key
-        self._attr_name = name
-        self._attr_options = options
+        super().__init__(coordinator, device_id, spec.key)
+        self._spec = spec
+        self._key = spec.key
+        self._attr_name = spec.name or spec.key
+        self._attr_options = list(spec.options)
 
     @property
     def current_option(self) -> str | None:
@@ -65,16 +57,14 @@ class GoveeSelect(GoveeEntity, SelectEntity):
 
     async def async_select_option(self, option: str) -> None:
         """Apply the selected option."""
-        profile = self.device.profile
-        if self._key == "ice_size":
-            await self._send(commands.ice_size(profile, option), {"ice_size": option})
+        if self._spec.control is None:
             return
-        if self._key == "fan_speed":
-            level = self._attr_options.index(option) + 1
-            await self._send(
-                commands.heater_speed(profile, level),
-                {
-                    "fan_speed": level,
-                    "percentage": round(level * 100 / len(self._attr_options)),
-                },
+        result = self._spec.control(
+            ControlContext(
+                self.device.profile,
+                self.device.state,
+                option,
+                options=tuple(self._attr_options),
             )
+        )
+        await self._send(result.command, dict(result.optimistic))

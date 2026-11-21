@@ -226,7 +226,7 @@ async def test_router_prefers_ble_over_cloud() -> None:
     router = CommandRouter(
         (
             BleGattTransport(available=True, manager_factory=manager_factory(managers)),
-            CloudMqttTransport(lambda: iot, enabled=True),
+            CloudMqttTransport(enabled=True, client=iot),  # type: ignore[arg-type],
         )
     )
 
@@ -247,7 +247,7 @@ async def test_router_falls_back_when_ble_write_fails(caplog: Any) -> None:
                 available=True,
                 manager_factory=manager_factory(managers, fail=True),
             ),
-            CloudMqttTransport(lambda: iot, enabled=True),
+            CloudMqttTransport(enabled=True, client=iot),  # type: ignore[arg-type],
         )
     )
 
@@ -265,7 +265,7 @@ async def test_router_falls_back_when_ble_has_no_address() -> None:
     router = CommandRouter(
         (
             BleGattTransport(available=True, manager_factory=manager_factory(managers)),
-            CloudMqttTransport(lambda: iot, enabled=True),
+            CloudMqttTransport(enabled=True, client=iot),  # type: ignore[arg-type],
         )
     )
     target = device(ble_address=None)

@@ -8,12 +8,14 @@ report ``supported = False`` rather than pretending to work.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import time
 from abc import ABC, abstractmethod
-from collections.abc import Callable, Iterable
+from collections.abc import Awaitable, Callable, Iterable
 from dataclasses import dataclass
 from enum import StrEnum
+from pathlib import Path
 from typing import Any
 
 from .api.ble import GoveeBle
@@ -64,10 +66,16 @@ class TransportUnavailable(TransportNotSent):
 
 @dataclass(frozen=True, slots=True)
 class StatusReport:
-    """A decoded-later status payload reported by a transport."""
+    """A decoded-later status payload reported by a transport.
+
+    ``ip`` and ``seen_at`` are present when the report itself proves that the
+    device answered on an endpoint, as a LAN ``devStatus`` datagram does.
+    """
 
     device_id: str
     payload: dict[str, Any]
+    ip: str | None = None
+    seen_at: float | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -108,6 +116,27 @@ class Transport(ABC):
     def supports_command(self, command: Command) -> bool:
         """Whether this adapter can encode ``command`` for its own path."""
         return True
+
+    async def async_start(self) -> None:
+        """Prepare this adapter's client.
+
+        Adapters with nothing to open keep the default no-op.
+        """
+        return
+
+    async def async_stop(self) -> None:
+        """Release this adapter's client.
+
+        Adapters with nothing to close keep the default no-op.
+        """
+        return
+
+    async def async_scan(self) -> None:
+        """Run any periodic discovery this adapter owns.
+
+        Only adapters that discover devices implement this.
+        """
+        return
 
     @abstractmethod
     async def send(self, device: GoveeDevice, command: Command) -> None:
@@ -458,18 +487,37 @@ def _lan_wire(command: Command) -> tuple[str, dict[str, Any]] | None:
 
 
 class CloudMqttTransport(Transport):
-    """Govee's AWS IoT / cloud MQTT path."""
+    """Govee's AWS IoT / cloud MQTT path.
+
+    The adapter owns its ``GoveeIot`` client: it asks the supplied certificate
+    source for credentials, connects on start, disconnects on stop, and
+    normalizes inbound messages into :class:`StatusReport` events.
+    """
 
     kind = TransportKind.CLOUD_MQTT
 
     def __init__(
         self,
-        iot: Callable[[], GoveeIot | None],
         *,
         enabled: bool,
+        account_id: str = "",
+        client_id: str = "",
+        account_topic: str = "",
+        cert_dir: Path | None = None,
+        loop: asyncio.AbstractEventLoop | None = None,
+        certificate: Callable[[], Awaitable[dict[str, Any]]] | None = None,
+        on_event: Callable[[InboundEvent], None] | None = None,
+        client: GoveeIot | None = None,
     ) -> None:
-        self._iot = iot
         self.enabled = enabled
+        self._account_id = account_id
+        self._client_id = client_id
+        self._account_topic = account_topic
+        self._cert_dir = cert_dir
+        self._loop = loop
+        self._certificate = certificate
+        self._on_event = on_event
+        self._iot = client
 
     @property
     def supported(self) -> bool:
@@ -477,15 +525,14 @@ class CloudMqttTransport(Transport):
 
     @property
     def connected(self) -> bool:
-        client = self._iot()
-        return bool(client and client.connected)
+        return bool(self._iot and self._iot.connected)
 
     def supports(self, device: GoveeDevice) -> bool:
         return (
             self.enabled
             and bool(device.iot_topic)
-            and (client := self._iot()) is not None
-            and client.connected
+            and self._iot is not None
+            and self._iot.connected
         )
 
     def supports_status(self, device: GoveeDevice) -> bool:
@@ -494,8 +541,45 @@ class CloudMqttTransport(Transport):
     def supports_command(self, command: Command) -> bool:
         return command.action in CLOUD_ACTIONS
 
+    async def async_start(self) -> None:
+        """Connect the IoT client if credentials and an account topic exist."""
+        if not self.enabled or self._iot is not None:
+            return
+        if not self._account_topic:
+            _LOGGER.warning("Govee did not return an account topic; skipping IoT transport")
+            return
+        if self._certificate is None or self._cert_dir is None or self._loop is None:
+            _LOGGER.warning("The IoT transport is missing its certificate source")
+            return
+        try:
+            certificate = await self._certificate()
+        except Exception as err:  # keep the LAN/polling paths alive
+            _LOGGER.warning("Unable to obtain the Govee IoT certificate: %s", err)
+            return
+        iot = GoveeIot(
+            account_id=self._account_id,
+            client_id=self._client_id,
+            account_topic=self._account_topic,
+            cert_dir=self._cert_dir,
+            loop=self._loop,
+            on_message=self._handle_message,
+        )
+        try:
+            await iot.async_start(certificate)
+        except Exception as err:  # keep the LAN/polling paths alive
+            _LOGGER.warning("Unable to connect to Govee IoT: %s", err)
+            return
+        self._iot = iot
+
+    async def async_stop(self) -> None:
+        """Disconnect the IoT client and forget it."""
+        client = self._iot
+        self._iot = None
+        if client is not None:
+            await client.async_stop()
+
     async def send(self, device: GoveeDevice, command: Command) -> None:
-        client = self._iot()
+        client = self._iot
         if not self.enabled or client is None or not client.connected:
             raise TransportUnavailable("The Govee IoT connection is not available")
         if not device.iot_topic:
@@ -515,7 +599,7 @@ class CloudMqttTransport(Transport):
             raise
 
     async def request_status(self, device: GoveeDevice) -> None:
-        client = self._iot()
+        client = self._iot
         if not self.enabled or client is None or not client.connected:
             raise TransportUnavailable("The Govee IoT connection is not available")
         if not device.iot_topic:
@@ -529,8 +613,13 @@ class CloudMqttTransport(Transport):
         """Normalize an IoT message into a typed status report."""
         return StatusReport(str(payload.get("device") or ""), payload)
 
+    def _handle_message(self, payload: dict[str, Any]) -> None:
+        """Normalize one inbound IoT message and hand it to the consumer."""
+        if self._on_event is not None:
+            self._on_event(self.event(payload))
+
     def status(self) -> dict[str, Any]:
-        client = self._iot()
+        client = self._iot
         return {
             "kind": self.kind.value,
             "supported": self.supported,
@@ -541,18 +630,29 @@ class CloudMqttTransport(Transport):
 
 
 class LanUdpTransport(Transport):
-    """The local UDP multicast path."""
+    """The local UDP multicast path.
+
+    The adapter owns its ``GoveeLan`` client and turns every datagram into
+    either a :class:`StatusReport` or a :class:`LanObservation`. Endpoint loss
+    is reported through ``on_endpoint_lost`` instead of mutating a device.
+    """
 
     kind = TransportKind.LAN_UDP
 
     def __init__(
         self,
-        lan: Callable[[], GoveeLan | None],
+        loop: asyncio.AbstractEventLoop | None = None,
         *,
         enabled: bool,
+        on_event: Callable[[InboundEvent], None] | None = None,
+        on_endpoint_lost: Callable[[str], None] | None = None,
+        client: GoveeLan | None = None,
     ) -> None:
-        self._lan = lan
         self.enabled = enabled
+        self._loop = loop
+        self._on_event = on_event
+        self._on_endpoint_lost = on_endpoint_lost
+        self._lan = client
 
     @property
     def supported(self) -> bool:
@@ -560,10 +660,10 @@ class LanUdpTransport(Transport):
 
     @property
     def connected(self) -> bool:
-        return self._lan() is not None
+        return self._lan is not None
 
     def supports(self, device: GoveeDevice) -> bool:
-        return self.enabled and bool(device.lan_ip) and self._lan() is not None
+        return self.enabled and bool(device.lan_ip) and self._lan is not None
 
     def supports_command(self, command: Command) -> bool:
         if command.action in LAN_ACTIONS:
@@ -572,8 +672,39 @@ class LanUdpTransport(Transport):
             return bool(command.parameters.get("lan", True))
         return False
 
+    async def async_start(self) -> None:
+        """Bind the LAN sockets when the transport is enabled."""
+        if not self.enabled or self._lan is not None:
+            return
+        if self._loop is None:
+            _LOGGER.warning("The LAN transport is missing its event loop")
+            return
+        lan = GoveeLan(self._loop, self._handle_message)
+        try:
+            await lan.async_start()
+        except Exception as err:  # keep cloud polling alive when LAN is unavailable
+            _LOGGER.warning("Unable to start Govee LAN discovery: %s", err)
+            return
+        self._lan = lan
+
+    async def async_stop(self) -> None:
+        """Close the LAN sockets and forget the client."""
+        client = self._lan
+        self._lan = None
+        if client is not None:
+            await client.async_stop()
+
+    async def async_scan(self) -> None:
+        """Send the multicast scan request when the client is running."""
+        if self._lan is None:
+            return
+        try:
+            await self._lan.async_scan()
+        except OSError as err:
+            _LOGGER.debug("LAN scan failed: %s", err)
+
     async def send(self, device: GoveeDevice, command: Command) -> None:
-        client = self._lan()
+        client = self._lan
         if not self.enabled or client is None:
             raise TransportUnavailable("The LAN transport is not started")
         payload = _lan_wire(command)
@@ -587,14 +718,14 @@ class LanUdpTransport(Transport):
             await client.async_send_command(ip, cmd, data)
         except OSError as err:
             _LOGGER.debug("LAN command failed for %s (%s): %s", device.name, ip, err)
-            device.lan_failed()
+            self._endpoint_lost(device.device_id)
             raise TransportNotSent(str(err)) from err
         except RuntimeError as err:
             _LOGGER.debug("LAN command failed for %s (%s): %s", device.name, ip, err)
             raise TransportNotSent(str(err)) from err
 
     async def request_status(self, device: GoveeDevice) -> None:
-        client = self._lan()
+        client = self._lan
         if not self.enabled or client is None:
             raise TransportUnavailable("The LAN transport is not started")
         if not device.lan_ip:
@@ -604,7 +735,7 @@ class LanUdpTransport(Transport):
             await client.async_request_status(ip)
         except OSError as err:
             _LOGGER.debug("LAN status request failed for %s (%s): %s", device.name, ip, err)
-            device.lan_failed()
+            self._endpoint_lost(device.device_id)
             raise TransportNotSent(str(err)) from err
         except RuntimeError as err:
             _LOGGER.debug("LAN status request failed for %s (%s): %s", device.name, ip, err)
@@ -620,12 +751,22 @@ class LanUdpTransport(Transport):
         seen_at: float | None = None,
     ) -> InboundEvent:
         """Normalize a LAN datagram into a typed status report or observation."""
+        observed_at = seen_at if seen_at is not None else time.monotonic()
         if command == "devStatus":
-            return StatusReport(device_id, data)
-        return LanObservation(device_id, ip, seen_at if seen_at is not None else time.monotonic())
+            return StatusReport(device_id, data, ip=ip, seen_at=observed_at)
+        return LanObservation(device_id, ip, observed_at)
+
+    def _handle_message(self, device_id: str, command: str, data: dict[str, Any], ip: str) -> None:
+        """Normalize one inbound datagram and hand it to the consumer."""
+        if self._on_event is not None:
+            self._on_event(self.event(device_id, command, data, ip))
+
+    def _endpoint_lost(self, device_id: str) -> None:
+        if self._on_endpoint_lost is not None:
+            self._on_endpoint_lost(device_id)
 
     def status(self) -> dict[str, Any]:
-        client = self._lan()
+        client = self._lan
         return {
             "kind": self.kind.value,
             "supported": self.supported,
@@ -646,11 +787,32 @@ class CommandRouter:
     )
 
     def __init__(self, transports: Iterable[Transport]) -> None:
-        self._transports = {transport.kind: transport for transport in transports}
+        self._transports: dict[TransportKind, Transport] = {}
+        for transport in transports:
+            self.register(transport)
+
+    def register(self, transport: Transport) -> None:
+        """Add one adapter; a later adapter for the same kind replaces it."""
+        self._transports[transport.kind] = transport
 
     def get(self, kind: TransportKind) -> Transport | None:
         """Return the adapter for ``kind`` if it is registered."""
         return self._transports.get(kind)
+
+    async def async_start(self) -> None:
+        """Start every registered adapter in registration order."""
+        for transport in self._transports.values():
+            await transport.async_start()
+
+    async def async_stop(self) -> None:
+        """Stop every registered adapter in reverse registration order."""
+        for transport in reversed(tuple(self._transports.values())):
+            await transport.async_stop()
+
+    async def async_scan(self) -> None:
+        """Run each adapter's periodic discovery hook."""
+        for transport in self._transports.values():
+            await transport.async_scan()
 
     def _ordered(self) -> Iterable[Transport]:
         for kind in self._ORDER:

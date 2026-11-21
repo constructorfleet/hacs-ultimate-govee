@@ -13,8 +13,7 @@ from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
 from .coordinator import GoveeCoordinator
 from .entity import GoveeEntity
-from .entity_plan import PLATFORM_NUMBER, EntitySpec, entities_for_platform
-from .protocol import commands
+from .entity_plan import PLATFORM_NUMBER, ControlContext, EntitySpec, entities_for_platform
 
 
 def _govee_number(
@@ -25,7 +24,7 @@ def _govee_number(
     return GoveeNumber(
         coordinator,
         device_id,
-        spec.key,
+        spec,
         spec.name or spec.key,
         minimum=spec.minimum if spec.minimum is not None else 0.0,
         maximum=spec.maximum if spec.maximum is not None else 0.0,
@@ -58,7 +57,7 @@ class GoveeNumber(GoveeEntity, NumberEntity):
         self,
         coordinator: GoveeCoordinator,
         device_id: str,
-        key: str,
+        spec: EntitySpec,
         name: str,
         *,
         minimum: float,
@@ -67,8 +66,9 @@ class GoveeNumber(GoveeEntity, NumberEntity):
         device_class: NumberDeviceClass | None = None,
         unit: str | None = None,
     ) -> None:
-        super().__init__(coordinator, device_id, key)
-        self._key = key
+        super().__init__(coordinator, device_id, spec.key)
+        self._spec = spec
+        self._key = spec.key
         self._attr_name = name
         self._attr_native_min_value = minimum
         self._attr_native_max_value = maximum
@@ -85,21 +85,7 @@ class GoveeNumber(GoveeEntity, NumberEntity):
 
     async def async_set_native_value(self, value: float) -> None:
         """Apply the new setting."""
-        profile = self.device.profile
-        if self._key == "target_temperature":
-            await self._send(
-                commands.heater_target(profile, value),
-                {"target_temperature": value},
-            )
+        if self._spec.control is None:
             return
-        if self._key == "night_light_brightness":
-            brightness = round(value)
-            await self._send(
-                commands.night_light(
-                    profile,
-                    True,
-                    brightness,
-                    self.device.state.color or (255, 255, 255),
-                ),
-                {"night_light_brightness": brightness, "night_light": True},
-            )
+        result = self._spec.control(ControlContext(self.device.profile, self.device.state, value))
+        await self._send(result.command, dict(result.optimistic))

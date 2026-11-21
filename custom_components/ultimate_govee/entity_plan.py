@@ -1,15 +1,16 @@
 """The Home Assistant entities a device profile supports.
 
 The entity plan is the one place that decides which entities exist for a
-profile and what metadata they carry. Platform modules are thin adapters: they
-ask the plan for their platform's specs and instantiate them. Command builders
-stay in the platform modules.
+profile, what metadata they carry, and how a control action becomes a
+:class:`~.protocol.command.Command`. Platform modules are thin adapters: they
+ask the plan for their platform's specs and instantiate them.
 """
 
 from __future__ import annotations
 
-from dataclasses import dataclass
-from typing import Final
+from collections.abc import Callable, Mapping
+from dataclasses import dataclass, field
+from typing import Any, Final
 
 from homeassistant.components.binary_sensor import BinarySensorDeviceClass
 from homeassistant.components.number import NumberDeviceClass
@@ -24,7 +25,9 @@ from homeassistant.const import (
     UnitOfRatio,
     UnitOfTemperature,
 )
+from homeassistant.util.percentage import percentage_to_ordered_list_item
 
+from .models import DeviceState
 from .profiles import (
     FEATURE_DISPLAY,
     FEATURE_ICE_SIZE,
@@ -50,6 +53,8 @@ from .profiles import (
     binary_sensor_keys,
     sensor_keys,
 )
+from .protocol import commands
+from .protocol.command import Command
 
 PLATFORM_BINARY_SENSOR: Final = "binary_sensor"
 PLATFORM_FAN: Final = "fan"
@@ -64,13 +69,41 @@ type DeviceClass = SensorDeviceClass | BinarySensorDeviceClass | NumberDeviceCla
 
 
 @dataclass(frozen=True, slots=True)
+class ControlContext:
+    """The device facts and requested value for one control action."""
+
+    profile: DeviceProfile
+    state: DeviceState
+    value: Any = None
+    options: tuple[str, ...] = ()
+    operation: str = ""
+    parameters: Mapping[str, Any] = field(default_factory=dict)
+
+
+@dataclass(frozen=True, slots=True)
+class ControlResult:
+    """The Command a control action produces and its optimistic state."""
+
+    command: Command
+    optimistic: Mapping[str, Any] = field(default_factory=dict)
+
+
+ControlBuilder = Callable[[ControlContext], ControlResult]
+
+FAN_OPERATION_POWER: Final = "power"
+FAN_OPERATION_SPEED: Final = "speed"
+FAN_OPERATION_MODE: Final = "mode"
+FAN_OPERATION_OSCILLATE: Final = "oscillate"
+
+
+@dataclass(frozen=True, slots=True)
 class EntitySpec:
     """One entity a profile supports and the metadata it needs."""
 
     platform: str
     key: str
     state_key: str | None = None
-    control_key: str | None = None
+    control: ControlBuilder | None = None
     name: str | None = None
     translation_key: str | None = None
     device_class: DeviceClass | None = None
@@ -258,6 +291,154 @@ _FAN_KINDS: Final[frozenset[str]] = frozenset(
 )
 
 
+def _power_switch(ctx: ControlContext) -> ControlResult:
+    profile = ctx.profile
+    on = bool(ctx.value)
+    if profile.kind == KIND_ICE_MAKER:
+        command = commands.ice_power(profile, on)
+    elif profile.kind == KIND_HEATER:
+        command = commands.heater_power(profile, on)
+    else:
+        command = commands.power(profile, on)
+    return ControlResult(command, {"power": on})
+
+
+def _gang_switch(index: int) -> ControlBuilder:
+    def build(ctx: ControlContext) -> ControlResult:
+        on = bool(ctx.value)
+        gangs = list(ctx.state.gangs or ())
+        while len(gangs) <= index:
+            gangs.append(False)
+        gangs[index] = on
+        return ControlResult(
+            commands.gang_power(ctx.profile, index, on),
+            {"gangs": tuple(gangs), "power": any(gangs)},
+        )
+
+    return build
+
+
+def _night_light_switch(ctx: ControlContext) -> ControlResult:
+    on = bool(ctx.value)
+    return ControlResult(
+        commands.night_light(
+            ctx.profile,
+            on,
+            ctx.state.night_light_brightness or 100,
+            ctx.state.color or (255, 255, 255),
+        ),
+        {"night_light": on},
+    )
+
+
+def _display_switch(ctx: ControlContext) -> ControlResult:
+    on = bool(ctx.value)
+    return ControlResult(commands.display(ctx.profile, on), {"display": on})
+
+
+def _lock_switch(ctx: ControlContext) -> ControlResult:
+    on = bool(ctx.value)
+    return ControlResult(commands.lock(ctx.profile, on), {"lock": on})
+
+
+def _uv_switch(ctx: ControlContext) -> ControlResult:
+    on = bool(ctx.value)
+    return ControlResult(commands.uv(ctx.profile, on), {"uv": on})
+
+
+def _oscillation_switch(ctx: ControlContext) -> ControlResult:
+    on = bool(ctx.value)
+    return ControlResult(commands.oscillation(ctx.profile, on), {"oscillation": on})
+
+
+_SWITCH_CONTROLS_BY_FEATURE: Final[dict[str, ControlBuilder]] = {
+    FEATURE_DISPLAY: _display_switch,
+    FEATURE_LOCK: _lock_switch,
+    FEATURE_NIGHT_LIGHT: _night_light_switch,
+    FEATURE_OSCILLATION: _oscillation_switch,
+    FEATURE_UV: _uv_switch,
+}
+
+
+def _target_temperature(ctx: ControlContext) -> ControlResult:
+    value = float(ctx.value)
+    return ControlResult(
+        commands.heater_target(ctx.profile, value),
+        {"target_temperature": value},
+    )
+
+
+def _night_light_brightness(ctx: ControlContext) -> ControlResult:
+    brightness = round(float(ctx.value))
+    return ControlResult(
+        commands.night_light(
+            ctx.profile,
+            True,
+            brightness,
+            ctx.state.color or (255, 255, 255),
+        ),
+        {"night_light_brightness": brightness, "night_light": True},
+    )
+
+
+def _ice_size(ctx: ControlContext) -> ControlResult:
+    option = str(ctx.value)
+    return ControlResult(commands.ice_size(ctx.profile, option), {"ice_size": option})
+
+
+def _heater_speed_select(ctx: ControlContext) -> ControlResult:
+    option = str(ctx.value)
+    level = ctx.options.index(option) + 1
+    percentage = round(level * 100 / len(ctx.options))
+    return ControlResult(
+        commands.heater_speed(ctx.profile, level),
+        {"fan_speed": level, "percentage": percentage},
+    )
+
+
+def _fan_level(profile: DeviceProfile, percentage: int | None) -> int:
+    """Map a percentage to the same 1-based level the fan entity reports."""
+    speeds = tuple(str(speed) for speed in range(1, profile.fan_speeds + 1))
+    if percentage is None or not speeds:
+        return 1
+    return int(percentage_to_ordered_list_item(list(speeds), percentage))
+
+
+def _fan_control(ctx: ControlContext) -> ControlResult:
+    profile = ctx.profile
+    if ctx.operation == FAN_OPERATION_POWER:
+        on = bool(ctx.value)
+        if profile.kind in {KIND_PURIFIER, KIND_DEHUMIDIFIER}:
+            command = commands.power(profile, on)
+        else:
+            command = commands.fan_power(profile, on, int(ctx.parameters.get("speed", 1)))
+        return ControlResult(command, {"power": on})
+    if ctx.operation == FAN_OPERATION_SPEED:
+        percentage = int(ctx.value)
+        level = _fan_level(profile, percentage)
+        if profile.kind == KIND_PURIFIER:
+            command = commands.purifier_speed(profile, percentage)
+        else:
+            command = commands.fan_speed(profile, level)
+        return ControlResult(command, {"percentage": percentage, "fan_speed": level})
+    if ctx.operation == FAN_OPERATION_MODE:
+        mode = str(ctx.value)
+        if profile.kind == KIND_PURIFIER:
+            command = commands.purifier_mode(profile, mode)
+        elif profile.kind == KIND_DEHUMIDIFIER:
+            command = commands.dehumidifier_mode(profile, mode)
+        else:
+            command = commands.fan_mode(profile, mode)
+        return ControlResult(command, {"mode": mode, "power": True})
+    if ctx.operation == FAN_OPERATION_OSCILLATE:
+        on = bool(ctx.value)
+        return ControlResult(
+            commands.oscillation(profile, on),
+            {"oscillation": on},
+        )
+    raise ValueError(f"Unknown fan operation {ctx.operation!r}")
+
+
 def _binary_sensor_specs(profile: DeviceProfile) -> tuple[EntitySpec, ...]:
     return tuple(
         _BINARY_SENSOR_SPECS[key]
@@ -268,7 +449,7 @@ def _binary_sensor_specs(profile: DeviceProfile) -> tuple[EntitySpec, ...]:
 
 def _fan_specs(profile: DeviceProfile) -> tuple[EntitySpec, ...]:
     if profile.kind in _FAN_KINDS:
-        return (EntitySpec(platform=PLATFORM_FAN, key="fan"),)
+        return (EntitySpec(platform=PLATFORM_FAN, key="fan", control=_fan_control),)
     return ()
 
 
@@ -292,7 +473,7 @@ def _number_specs(profile: DeviceProfile) -> tuple[EntitySpec, ...]:
                 platform=PLATFORM_NUMBER,
                 key="target_temperature",
                 state_key="target_temperature",
-                control_key="target_temperature",
+                control=_target_temperature,
                 name="Target temperature",
                 device_class=NumberDeviceClass.TEMPERATURE,
                 unit=UnitOfTemperature.CELSIUS,
@@ -307,7 +488,7 @@ def _number_specs(profile: DeviceProfile) -> tuple[EntitySpec, ...]:
                 platform=PLATFORM_NUMBER,
                 key="night_light_brightness",
                 state_key="night_light_brightness",
-                control_key="night_light_brightness",
+                control=_night_light_brightness,
                 name="Night light brightness",
                 minimum=1,
                 maximum=100,
@@ -324,7 +505,7 @@ def _select_specs(profile: DeviceProfile) -> tuple[EntitySpec, ...]:
                 platform=PLATFORM_SELECT,
                 key="ice_size",
                 state_key="ice_size",
-                control_key="ice_size",
+                control=_ice_size,
                 name="Ice size",
                 options=profile.ice_sizes,
             ),
@@ -335,7 +516,7 @@ def _select_specs(profile: DeviceProfile) -> tuple[EntitySpec, ...]:
                 platform=PLATFORM_SELECT,
                 key="fan_speed",
                 state_key="fan_speed",
-                control_key="fan_speed",
+                control=_heater_speed_select,
                 name="Fan speed",
                 options=profile.modes or ("low", "medium", "high"),
             ),
@@ -353,7 +534,7 @@ def _gang_specs(profile: DeviceProfile) -> tuple[EntitySpec, ...]:
             platform=PLATFORM_SWITCH,
             key=f"gang{index}",
             state_key=f"gang{index}",
-            control_key=f"gang{index}",
+            control=_gang_switch(index),
             name=f"Gang {index + 1}",
         )
         for index in range(profile.gang_count)
@@ -370,7 +551,7 @@ def _switch_specs(profile: DeviceProfile) -> tuple[EntitySpec, ...]:
                 platform=PLATFORM_SWITCH,
                 key="power",
                 state_key="power",
-                control_key="power",
+                control=_power_switch,
             )
         )
 
@@ -380,7 +561,7 @@ def _switch_specs(profile: DeviceProfile) -> tuple[EntitySpec, ...]:
                 platform=PLATFORM_SWITCH,
                 key=feature,
                 state_key=feature,
-                control_key=feature,
+                control=_SWITCH_CONTROLS_BY_FEATURE[feature],
                 name=name,
                 entity_category=category,
             )
@@ -410,6 +591,10 @@ def entities_for_platform(profile: DeviceProfile, platform: str) -> tuple[Entity
 
 
 __all__ = [
+    "FAN_OPERATION_MODE",
+    "FAN_OPERATION_OSCILLATE",
+    "FAN_OPERATION_POWER",
+    "FAN_OPERATION_SPEED",
     "PLATFORM_BINARY_SENSOR",
     "PLATFORM_FAN",
     "PLATFORM_HUMIDIFIER",
@@ -418,6 +603,8 @@ __all__ = [
     "PLATFORM_SELECT",
     "PLATFORM_SENSOR",
     "PLATFORM_SWITCH",
+    "ControlContext",
+    "ControlResult",
     "EntitySpec",
     "entities_for_platform",
     "plan_entities",
