@@ -446,31 +446,25 @@ def profile_for(
     if sku in DIFFUSER_MODELS:
         return DeviceProfile(
             kind=KIND_DIFFUSER,
-            features={
-                FEATURE_POWER,
-                FEATURE_BRIGHTNESS,
-                FEATURE_COLOR,
-                FEATURE_COLOR_TEMP,
-                FEATURE_MODE,
-                FEATURE_NIGHT_LIGHT,
-                FEATURE_TIMER,
-            },
-            modes=("manual", "auto"),
+            features={FEATURE_POWER},
             model_name=sku,
         )
     if sku in ICE_MAKER_MODELS:
+        if sku in {"H8102", "H8131"}:
+            return DeviceProfile(
+                kind=KIND_ICE_MAKER,
+                features={FEATURE_POWER},
+                model_name=sku,
+            )
+        features = {FEATURE_POWER}
+        ice_sizes: tuple[str, ...] = ()
+        if sku != "H8120":
+            features.add(FEATURE_ICE_SIZE)
+            ice_sizes = ICE_SIZES
         return DeviceProfile(
             kind=KIND_ICE_MAKER,
-            features={
-                FEATURE_POWER,
-                FEATURE_ICE_SIZE,
-                FEATURE_BASKET,
-                FEATURE_WATER_TANK,
-                FEATURE_NIGHT_LIGHT,
-                FEATURE_TIMER,
-                FEATURE_DISPLAY,
-            },
-            ice_sizes=ICE_SIZES,
+            features=features,
+            ice_sizes=ice_sizes,
             model_name=sku,
         )
     if sku in KETTLE_MODELS:
@@ -479,10 +473,7 @@ def profile_for(
             features={
                 FEATURE_POWER,
                 FEATURE_TEMPERATURE,
-                FEATURE_TARGET_TEMPERATURE,
                 FEATURE_MODE,
-                FEATURE_LOCK,
-                FEATURE_NIGHT_LIGHT,
             },
             modes=("custom", "green_tea", "oolong_tea", "coffee", "black_tea"),
             model_name=sku,
@@ -490,7 +481,7 @@ def profile_for(
     if sku in COMPOSTER_MODELS:
         return DeviceProfile(
             kind=KIND_COMPOSTER,
-            features={FEATURE_POWER, FEATURE_MODE, FEATURE_NIGHT_LIGHT},
+            features={FEATURE_POWER},
             model_name=sku,
         )
     if sku in TV_MODELS:

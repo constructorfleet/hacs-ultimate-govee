@@ -5,6 +5,7 @@ from __future__ import annotations
 import logging
 from typing import Any
 
+import aiohttp
 from homeassistant.components.light import (
     ATTR_BRIGHTNESS,
     ATTR_COLOR_TEMP_KELVIN,
@@ -115,7 +116,7 @@ class GoveeLight(GoveeEntity, LightEntity):
         self._effects_loaded = True
         try:
             await self.coordinator.async_get_effects(self.device)
-        except (GoveeApiError, OSError) as err:
+        except (GoveeApiError, aiohttp.ClientError, OSError) as err:
             _LOGGER.debug("Unable to load effects for %s: %s", self.device.name, err)
             return
         self.async_write_ha_state()

@@ -46,8 +46,6 @@ class GoveeHumidifier(GoveeEntity, HumidifierEntity):
         super().__init__(coordinator, device_id, "humidifier")
         profile = self.device.profile
         features = HumidifierEntityFeature(0)
-        if FEATURE_TARGET_HUMIDITY in profile.features:
-            features |= HumidifierEntityFeature.TARGET_HUMIDITY
         if FEATURE_MODE in profile.features and profile.modes:
             features |= HumidifierEntityFeature.MODES
             self._attr_available_modes = list(profile.modes)

@@ -97,8 +97,8 @@ class GoveeIot:
             return
         client = self._client
         self._client = None
-        await asyncio.to_thread(client.loop_stop)
         client.disconnect()
+        await asyncio.to_thread(client.loop_stop)
 
     def publish(self, topic: str, payload: dict[str, Any]) -> None:
         """Publish a JSON payload to a device topic."""

@@ -178,6 +178,9 @@ class GoveeCoordinator(DataUpdateCoordinator[GoveeData]):
     async def _async_start_iot(self) -> None:
         if self._iot_started:
             return
+        if not self.auth.account_topic:
+            _LOGGER.warning("Govee did not return an account topic; skipping IoT transport")
+            return
         try:
             certificate = await self.cloud.get_iot_certificate()
         except Exception as err:  # keep the LAN/polling paths alive
