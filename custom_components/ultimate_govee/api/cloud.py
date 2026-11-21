@@ -11,6 +11,7 @@ from ..const import (
     DEVICE_LIST_URL,
     EFFECT_LIBRARY_URL,
     IOT_CERT_URL,
+    TAP_TO_RUN_URL,
 )
 from .auth import GoveeAuth, GoveeAuthError
 
@@ -50,6 +51,13 @@ class GoveeCloud:
             params["device"] = device
         data = await self._request("GET", EFFECT_LIBRARY_URL, params=params)
         return _flatten_effects(data.get("data") or data)
+
+    async def get_tap_to_runs(self) -> list[dict[str, Any]]:
+        """Return the account's one-click/tap-to-run components."""
+        data = await self._request("GET", TAP_TO_RUN_URL)
+        payload = data.get("data") or data
+        components = payload.get("components") if isinstance(payload, dict) else None
+        return [item for item in components or [] if isinstance(item, dict)]
 
     async def _request(self, method: str, url: str, **kwargs: Any) -> dict[str, Any]:
         await self._auth.ensure_valid()

@@ -189,6 +189,9 @@ async def test_options_flow(hass: Any) -> None:
     result = await hass.config_entries.options.async_configure(
         result["flow_id"],
         {
+            "ignored_devices": ["device-1"],
+            "enable_effects": False,
+            "enable_tap_to_runs": True,
             "enable_lan": False,
             "enable_iot": True,
             "poll_interval": 120,
@@ -198,4 +201,7 @@ async def test_options_flow(hass: Any) -> None:
 
     assert result["type"] is FlowResultType.CREATE_ENTRY
     assert entry.options["enable_lan"] is False
+    assert entry.options["enable_effects"] is False
+    assert entry.options["enable_tap_to_runs"] is True
+    assert entry.options["ignored_devices"] == ["device-1"]
     assert entry.options["poll_interval"] == 120

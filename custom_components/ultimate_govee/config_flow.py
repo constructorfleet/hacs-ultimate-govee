@@ -17,13 +17,18 @@ from .api.auth import GoveeAuth, GoveeAuthError, generate_client_id
 from .api.cloud import GoveeApiError, GoveeCloud
 from .const import (
     CONF_EMAIL,
+    CONF_ENABLE_EFFECTS,
     CONF_ENABLE_IOT,
     CONF_ENABLE_LAN,
+    CONF_ENABLE_TAP_TO_RUNS,
+    CONF_IGNORED_DEVICES,
     CONF_LAN_SCAN_INTERVAL,
     CONF_PASSWORD,
     CONF_POLL_INTERVAL,
+    DEFAULT_ENABLE_EFFECTS,
     DEFAULT_ENABLE_IOT,
     DEFAULT_ENABLE_LAN,
+    DEFAULT_ENABLE_TAP_TO_RUNS,
     DEFAULT_LAN_SCAN_INTERVAL,
     DEFAULT_POLL_INTERVAL,
     DOMAIN,
@@ -144,8 +149,41 @@ class UltimateGoveeOptionsFlow(OptionsFlow):
             return self.async_create_entry(title="", data=user_input)
 
         options = self.config_entry.options
+        ignored = options.get(CONF_IGNORED_DEVICES, [])
+        ignored = ignored if isinstance(ignored, list) else []
+        coordinator = getattr(self.config_entry, "runtime_data", None)
+        devices = getattr(coordinator, "devices", {})
+        device_options = [
+            selector.SelectOptionDict(
+                value=device.device_id,
+                label=f"{device.name} ({device.sku})",
+            )
+            for device in sorted(devices.values(), key=lambda item: item.name.lower())
+        ]
+        known_ids = {option["value"] for option in device_options}
+        device_options.extend(
+            selector.SelectOptionDict(value=device_id, label=f"{device_id} (ignored)")
+            for device_id in ignored
+            if device_id not in known_ids
+        )
         schema = vol.Schema(
             {
+                vol.Optional(CONF_IGNORED_DEVICES, default=ignored): selector.SelectSelector(
+                    selector.SelectSelectorConfig(
+                        options=device_options,
+                        multiple=True,
+                        custom_value=True,
+                        mode=selector.SelectSelectorMode.DROPDOWN,
+                    )
+                ),
+                vol.Optional(
+                    CONF_ENABLE_EFFECTS,
+                    default=options.get(CONF_ENABLE_EFFECTS, DEFAULT_ENABLE_EFFECTS),
+                ): bool,
+                vol.Optional(
+                    CONF_ENABLE_TAP_TO_RUNS,
+                    default=options.get(CONF_ENABLE_TAP_TO_RUNS, DEFAULT_ENABLE_TAP_TO_RUNS),
+                ): bool,
                 vol.Optional(
                     CONF_ENABLE_LAN,
                     default=options.get(CONF_ENABLE_LAN, DEFAULT_ENABLE_LAN),

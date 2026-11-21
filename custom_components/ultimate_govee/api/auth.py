@@ -31,6 +31,7 @@ def _base_headers(client_id: str) -> dict[str, str]:
         "User-Agent": USER_AGENT,
         "appVersion": APP_VERSION,
         "AppVersion": APP_VERSION,
+        "timestamp": str(int(time.time() * 1000)),
     }
 
 

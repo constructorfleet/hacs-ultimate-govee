@@ -21,6 +21,8 @@ and reuses the opcode work from that project plus
   filter life and outlet power metering.
 - Binary sensors for leaks, presence, contacts, water tanks and ice baskets.
 - Ice size, night light, display, child lock and UV controls where supported.
+- Optional buttons for Govee tap-to-runs / one-click scenes.
+- Per-device opt-out: ignored devices are removed from Home Assistant.
 - Diagnostics download with credentials and device identifiers redacted.
 
 ## Installation
@@ -46,8 +48,13 @@ Copy `custom_components/ultimate_govee` into your Home Assistant
 3. Enter the email address and password for your Govee Home account.
 
 The integration creates one config entry per Govee account. Use the entry's
-**Configure** button to enable or disable LAN and cloud transports and to tune
-the polling intervals.
+**Configure** button to:
+
+- ignore devices, which removes their Home Assistant devices and entities;
+- enable or disable light-effect fetching;
+- enable optional tap-to-run buttons;
+- enable or disable LAN and cloud transports;
+- tune the polling and LAN discovery intervals.
 
 ## Supported devices
 

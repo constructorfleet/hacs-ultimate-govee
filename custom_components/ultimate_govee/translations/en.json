@@ -33,10 +33,18 @@
       "init": {
         "title": "Ultimate Govee options",
         "data": {
+          "ignored_devices": "Ignored devices",
+          "enable_effects": "Load light effects",
+          "enable_tap_to_runs": "Create tap-to-run buttons",
           "enable_lan": "Use local network control",
           "enable_iot": "Use cloud (AWS IoT) control",
           "poll_interval": "Cloud poll interval",
           "lan_scan_interval": "LAN discovery interval"
+        },
+        "data_description": {
+          "ignored_devices": "Devices removed here are deleted from Home Assistant until you clear the selection.",
+          "enable_effects": "Fetch the effect library for colour-capable lights.",
+          "enable_tap_to_runs": "Add a button for each Govee one-click scene. Requires cloud control."
         }
       }
     }

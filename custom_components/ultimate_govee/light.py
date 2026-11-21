@@ -98,6 +98,8 @@ class GoveeLight(GoveeEntity, LightEntity):
     @property
     def effect_list(self) -> list[str] | None:
         """Return the names of the device's effects."""
+        if not self.coordinator.enable_effects:
+            return None
         effects = self.coordinator.effects.get(self.device.sku)
         if not effects:
             return None
@@ -111,7 +113,11 @@ class GoveeLight(GoveeEntity, LightEntity):
     async def async_added_to_hass(self) -> None:
         """Load the effect library once the entity exists."""
         await super().async_added_to_hass()
-        if self._effects_loaded or not self.device.profile.supports_color:
+        if (
+            self._effects_loaded
+            or not self.coordinator.enable_effects
+            or not self.device.profile.supports_color
+        ):
             return
         self._effects_loaded = True
         try:

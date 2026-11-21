@@ -25,15 +25,20 @@ from .const import (
     CONF_ACCOUNT_TOPIC,
     CONF_CLIENT_ID,
     CONF_EMAIL,
+    CONF_ENABLE_EFFECTS,
     CONF_ENABLE_IOT,
     CONF_ENABLE_LAN,
+    CONF_ENABLE_TAP_TO_RUNS,
+    CONF_IGNORED_DEVICES,
     CONF_LAN_SCAN_INTERVAL,
     CONF_PASSWORD,
     CONF_POLL_INTERVAL,
     CONF_REFRESH_TOKEN,
     CONF_TOKEN_EXPIRES_AT,
+    DEFAULT_ENABLE_EFFECTS,
     DEFAULT_ENABLE_IOT,
     DEFAULT_ENABLE_LAN,
+    DEFAULT_ENABLE_TAP_TO_RUNS,
     DEFAULT_LAN_SCAN_INTERVAL,
     DEFAULT_POLL_INTERVAL,
     DOMAIN,
@@ -42,6 +47,7 @@ from .models import DeviceState, GoveeDevice
 from .profiles import DeviceProfile, profile_for
 from .protocol.commands import WireCommand
 from .protocol.state import decode_message
+from .tap_to_runs import TapAction, TapToRun, parse_tap_to_runs
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -71,6 +77,14 @@ class GoveeCoordinator(DataUpdateCoordinator[GoveeData]):
         )
         self.enable_lan = bool(options.get(CONF_ENABLE_LAN, DEFAULT_ENABLE_LAN))
         self.enable_iot = bool(options.get(CONF_ENABLE_IOT, DEFAULT_ENABLE_IOT))
+        self.enable_effects = bool(options.get(CONF_ENABLE_EFFECTS, DEFAULT_ENABLE_EFFECTS))
+        self.enable_tap_to_runs = bool(
+            options.get(CONF_ENABLE_TAP_TO_RUNS, DEFAULT_ENABLE_TAP_TO_RUNS)
+        )
+        ignored = options.get(CONF_IGNORED_DEVICES, [])
+        self.ignored_devices = {
+            str(device_id) for device_id in ignored if isinstance(device_id, str)
+        }
         self.lan_scan_interval = int(options.get(CONF_LAN_SCAN_INTERVAL, DEFAULT_LAN_SCAN_INTERVAL))
         data = entry.data
         self.auth = GoveeAuth(
@@ -87,6 +101,7 @@ class GoveeCoordinator(DataUpdateCoordinator[GoveeData]):
         self.cloud = GoveeCloud(session, self.auth)
         self.devices: GoveeData = {}
         self.effects: dict[str, list[dict[str, Any]]] = {}
+        self.tap_to_runs: list[TapToRun] | None = None
         self._cert_dir = cert_dir
         self._iot: GoveeIot | None = None
         self._lan: GoveeLan | None = None
@@ -122,10 +137,13 @@ class GoveeCoordinator(DataUpdateCoordinator[GoveeData]):
             raise UpdateFailed(str(err)) from err
 
         devices = self.devices
+        for device_id in list(devices):
+            if device_id in self.ignored_devices:
+                del devices[device_id]
         seen: set[str] = set()
         for raw in raw_devices:
             device_id = str(raw.get("device") or "")
-            if not device_id:
+            if not device_id or device_id in self.ignored_devices:
                 continue
             seen.add(device_id)
             device = devices.get(device_id)
@@ -287,6 +305,8 @@ class GoveeCoordinator(DataUpdateCoordinator[GoveeData]):
 
     async def async_get_effects(self, device: GoveeDevice) -> list[dict[str, Any]]:
         """Return and cache the effect library for a device."""
+        if not self.enable_effects:
+            return []
         cached = self.effects.get(device.sku)
         if cached is not None:
             return cached
@@ -296,6 +316,59 @@ class GoveeCoordinator(DataUpdateCoordinator[GoveeData]):
         )
         self.effects[device.sku] = effects
         return effects
+
+    async def async_get_tap_to_runs(self) -> list[TapToRun]:
+        """Fetch and cache the account's tap-to-runs."""
+        if self.tap_to_runs is not None:
+            return self.tap_to_runs
+        if not self.enable_tap_to_runs:
+            self.tap_to_runs = []
+            return self.tap_to_runs
+        components = await self.cloud.get_tap_to_runs()
+        self.tap_to_runs = parse_tap_to_runs(components)
+        return self.tap_to_runs
+
+    async def async_run_tap_to_run(self, tap_to_run: TapToRun) -> None:
+        """Publish every action in a tap-to-run to its device."""
+        if not self.enable_iot or self._iot is None or not self._iot.connected:
+            raise GoveeApiError("Tap-to-runs require an active Govee IoT connection")
+        sent = 0
+        for action in tap_to_run.actions:
+            device = self._resolve_tap_device(action)
+            if device is None or not device.iot_topic:
+                _LOGGER.debug(
+                    "Skipping tap-to-run %s action for %s (%s): no matching device",
+                    tap_to_run.name,
+                    action.device_name,
+                    action.sku,
+                )
+                continue
+            self._iot.send_command(
+                device.iot_topic,
+                action.command,
+                action.data,
+                cmd_version=action.cmd_version,
+                msg_type=action.msg_type,
+            )
+            sent += 1
+        if not sent:
+            raise GoveeApiError(f"No devices matched the {tap_to_run.name} tap-to-run")
+
+    def _resolve_tap_device(self, action: TapAction) -> GoveeDevice | None:
+        if action.device_id:
+            device = self.devices.get(action.device_id)
+            if device is not None:
+                return device
+        candidates = [
+            device
+            for device in self.devices.values()
+            if device.name == action.device_name and (not action.sku or device.sku == action.sku)
+        ]
+        if len(candidates) == 1:
+            return candidates[0]
+        if not candidates:
+            candidates = [device for device in self.devices.values() if device.sku == action.sku]
+        return candidates[0] if len(candidates) == 1 else None
 
 
 def _build_device(device_id: str, raw: dict[str, Any]) -> GoveeDevice:

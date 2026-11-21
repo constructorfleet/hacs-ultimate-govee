@@ -2,11 +2,13 @@
 
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, ClassVar
 
 import pytest
+from homeassistant.helpers import device_registry as dr
 from pytest_homeassistant_custom_component.common import MockConfigEntry
 
+from custom_components.ultimate_govee import _async_remove_ignored_devices
 from custom_components.ultimate_govee.const import DOMAIN
 from custom_components.ultimate_govee.coordinator import GoveeCoordinator
 from custom_components.ultimate_govee.models import DeviceState, GoveeDevice
@@ -171,3 +173,25 @@ async def test_all_platforms_create_entities(
     assert hass.states.get("fan.test_h7100")
     assert hass.states.get("humidifier.test_h7142")
     assert hass.states.get("number.test_h7130_target_temperature")
+
+
+async def test_ignored_device_registry_entry_is_removed(hass: Any) -> None:
+    """Opting a device out should delete its Home Assistant device entry."""
+    entry = MockConfigEntry(domain=DOMAIN, data={}, options={})
+    entry.add_to_hass(hass)
+    registry = dr.async_get(hass)
+    device = registry.async_get_or_create(
+        config_entry_id=entry.entry_id,
+        identifiers={(DOMAIN, "ignored-device")},
+        name="Ignored device",
+    )
+
+    class CoordinatorStub:
+        ignored_devices: ClassVar[set[str]] = {"ignored-device"}
+
+    _async_remove_ignored_devices(hass, entry, CoordinatorStub())  # type: ignore[arg-type]
+
+    assert (
+        registry.async_get_device_by_identifier((DOMAIN, "ignored-device"), entry.entry_id) is None
+    )
+    assert registry.async_get(device.id) is None

@@ -19,11 +19,16 @@ CONF_ACCOUNT_ID: Final = "account_id"
 CONF_ACCOUNT_TOPIC: Final = "account_topic"
 CONF_ENABLE_LAN: Final = "enable_lan"
 CONF_ENABLE_IOT: Final = "enable_iot"
+CONF_ENABLE_EFFECTS: Final = "enable_effects"
+CONF_ENABLE_TAP_TO_RUNS: Final = "enable_tap_to_runs"
+CONF_IGNORED_DEVICES: Final = "ignored_devices"
 CONF_POLL_INTERVAL: Final = "poll_interval"
 CONF_LAN_SCAN_INTERVAL: Final = "lan_scan_interval"
 
 DEFAULT_ENABLE_LAN: Final = True
 DEFAULT_ENABLE_IOT: Final = True
+DEFAULT_ENABLE_EFFECTS: Final = True
+DEFAULT_ENABLE_TAP_TO_RUNS: Final = False
 DEFAULT_POLL_INTERVAL: Final = 60
 DEFAULT_LAN_SCAN_INTERVAL: Final = 60
 
@@ -32,6 +37,7 @@ MAX_POLL_INTERVAL: Final = 3600
 
 PLATFORMS: Final = [
     "binary_sensor",
+    "button",
     "fan",
     "humidifier",
     "light",
@@ -49,6 +55,7 @@ REFRESH_URL: Final = "https://app2.govee.com/account/rest/v1/first/refresh-token
 IOT_CERT_URL: Final = "https://app2.govee.com/app/v1/account/iot/key"
 DEVICE_LIST_URL: Final = "https://app2.govee.com/device/rest/devices/v1/list"
 EFFECT_LIBRARY_URL: Final = "https://app2.govee.com/appsku/v1/light-effect-libraries"
+TAP_TO_RUN_URL: Final = "https://app2.govee.com/bff-app/v1/exec-plat/home"
 
 APP_VERSION: Final = "5.6.01"
 USER_AGENT: Final = (
