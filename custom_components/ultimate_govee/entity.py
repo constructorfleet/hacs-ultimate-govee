@@ -12,7 +12,7 @@ from .api.cloud import GoveeApiError
 from .const import DOMAIN, MANUFACTURER
 from .coordinator import GoveeCoordinator
 from .models import GoveeDevice
-from .protocol.commands import WireCommand
+from .protocol.command import Command
 
 
 class GoveeEntity(CoordinatorEntity[GoveeCoordinator]):
@@ -48,7 +48,7 @@ class GoveeEntity(CoordinatorEntity[GoveeCoordinator]):
             hw_version=device.hardware,
         )
 
-    async def _send(self, command: WireCommand, optimistic: dict[str, Any] | None = None) -> None:
+    async def _send(self, command: Command, optimistic: dict[str, Any] | None = None) -> None:
         try:
             await self.coordinator.async_send(self.device, command, optimistic=optimistic)
         except GoveeApiError as err:

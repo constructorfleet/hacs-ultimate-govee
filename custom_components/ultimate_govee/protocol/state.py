@@ -8,14 +8,11 @@ from typing import Any
 
 from ..models import DeviceState
 from ..profiles import (
-    HEATER2_MODELS,
-    KIND_CEILING_FAN,
     KIND_CO2,
     KIND_DEHUMIDIFIER,
     KIND_DIFFUSER,
     KIND_HEATER,
     KIND_HUMIDIFIER,
-    KIND_ICE_MAKER,
     KIND_KETTLE,
     KIND_LEAK,
     KIND_LIGHT,
@@ -26,13 +23,11 @@ from ..profiles import (
     KIND_SWITCH,
     KIND_THERMO,
     KIND_TV,
-    PURIFIER_3A_MODELS,
-    PURIFIER_3A_SPEEDS,
-    PURIFIER_H7120_MODELS,
-    PURIFIER_H7126_MODELS,
     DeviceProfile,
 )
 from .codec import ProtocolError, decode_frame, frames_from_command
+from .families import dialect_for
+from .families.common import apply_humidity_reading
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -305,6 +300,9 @@ def _decode_frame(
     payload: bytes,
     result: dict[str, Any],
 ) -> None:
+    if dialect_for(profile).decode_frame(profile, register, payload, result):
+        return
+
     kind = profile.kind
     if register == 0x01 and payload:
         if kind == KIND_PRESENCE:
@@ -329,9 +327,7 @@ def _decode_frame(
     elif register == 0x16 and payload:
         result["display"] = payload[0] != 0
     elif register == 0x18 and payload:
-        if kind == KIND_PURIFIER:
-            result["night_light"] = payload[0] != 0
-        elif kind == KIND_HEATER:
+        if kind == KIND_HEATER:
             result["oscillation"] = payload[0] != 0
         else:
             # Humidifiers only report AA 18; there is no display setter.
@@ -357,16 +353,11 @@ def _decode_frame(
     elif register == 0x17 and len(payload) >= 2:
         result["basket_full"] = payload[1] != 0
         result["water_shortage"] = payload[1] != 0
-    elif register == 0x19 and payload:
-        if kind == KIND_PURIFIER:
-            result["air_quality"] = payload[0]
-        elif kind == KIND_ICE_MAKER:
-            result["basket_full"] = payload[0] != 0
-        elif len(payload) >= 14:
-            # H5086 outlet power metering: voltage, current and power.
-            result["voltage"] = ((payload[7] << 8) | payload[8]) / 100
-            result["current"] = ((payload[9] << 8) | payload[10]) / 100
-            result["power_usage"] = ((payload[11] << 16) | (payload[12] << 8) | payload[13]) / 100
+    elif register == 0x19 and len(payload) >= 14:
+        # H5086 outlet power metering: voltage, current and power.
+        result["voltage"] = ((payload[7] << 8) | payload[8]) / 100
+        result["current"] = ((payload[9] << 8) | payload[10]) / 100
+        result["power_usage"] = ((payload[11] << 16) | (payload[12] << 8) | payload[13]) / 100
     elif register == 0x1C and len(payload) >= 3:
         # H7122 PM2.5 is big-endian; the exact byte offset is unconfirmed, so
         # accept the documented bytes 4+5 first.
@@ -379,36 +370,17 @@ def _decode_frame(
             if profile.fan_speeds:
                 result["percentage"] = round(payload[1] * 100 / profile.fan_speeds)
     elif register == 0x36 and payload:
-        if kind == KIND_CEILING_FAN:
-            # The first byte reports whether the main zone is powered. Keep
-            # any power already reported by another frame in the same message.
-            result.setdefault("power", payload[0] != 0)
-            result["night_light"] = payload[0] != 0
-        else:
-            _LOGGER.debug(
-                "Unhandled 0x36 frame for %s (%s): %s",
-                profile.model_name,
-                kind,
-                payload.hex(),
-            )
+        _LOGGER.debug(
+            "Unhandled 0x36 frame for %s (%s): %s",
+            profile.model_name,
+            kind,
+            payload.hex(),
+        )
 
 
 def _decode_humidity_frame(payload: bytes, result: dict[str, Any]) -> None:
-    """Decode ``AA 10 <flags> <3-byte reading>``.
-
-    The low 24 bits pack the humidity as tenths of a percent; the high bits
-    carry the temperature in tenths of a degree.
-    """
-    flags = payload[0]
-    if not flags & 0x81:
-        return
-    reading = (payload[1] << 16) | (payload[2] << 8) | payload[3]
-    if reading == 0xFFFFFF:
-        return
-    result["humidity"] = round((reading & 0x7FFFFF) % 1000 / 10, 1)
-    temperature = (reading // 1000) / 10
-    if temperature:
-        result["temperature"] = temperature
+    """Decode ``AA 10 <flags> <3-byte reading>`` for generic humidifiers."""
+    apply_humidity_reading(payload, result)
 
 
 def _decode_register_05(profile: DeviceProfile, payload: bytes, result: dict[str, Any]) -> None:
@@ -435,26 +407,6 @@ def _decode_register_05(profile: DeviceProfile, payload: bytes, result: dict[str
         elif sub == 0x03 and len(payload) >= 2:
             result["mode"] = "auto"
             result["target_humidity"] = payload[1]
-    elif kind == KIND_PURIFIER:
-        _decode_purifier_speed(profile, payload, result)
-    elif kind == KIND_HEATER:
-        _decode_heater_speed(profile, payload, result)
-    elif kind == KIND_DEHUMIDIFIER:
-        if sub == 0x00 and len(payload) >= 2:
-            result["mode"] = {1: "low", 2: "high", 3: "auto", 8: "dryer"}.get(
-                payload[1], str(payload[1])
-            )
-        elif sub in (0x01, 0x02) and len(payload) >= 2:
-            result["fan_speed"] = payload[1]
-            result["percentage"] = _gear_percentage(profile, payload[1])
-        elif len(payload) >= 2:
-            result["fan_speed"] = payload[1]
-    elif kind == KIND_ICE_MAKER:
-        index = sub if sub <= 3 else payload[-1]
-        sizes = profile.ice_sizes or ("small", "medium", "large")
-        size_index = index - 1 if profile.model_name in {"H8121", "H8122"} else len(sizes) - index
-        if 0 <= size_index < len(sizes):
-            result["ice_size"] = sizes[size_index]
     elif kind == KIND_KETTLE:
         result["mode"] = str(sub)
     else:
@@ -464,62 +416,6 @@ def _decode_register_05(profile: DeviceProfile, payload: bytes, result: dict[str
             kind,
             payload.hex(),
         )
-
-
-def _decode_heater_speed(profile: DeviceProfile, payload: bytes, result: dict[str, Any]) -> None:
-    """Decode the two heater speed report layouts.
-
-    Heater1 reports ``AA 05 <level>``. Heater2 reports fan-only as
-    ``AA 05 09``, speed as ``AA 05 01 <1-3>`` and auto as ``AA 05 03``.
-    """
-    if profile.model_name in HEATER2_MODELS:
-        sub = payload[0]
-        if sub == 0x09:
-            result["mode"] = "fan-only"
-            result["fan_speed"] = 1
-            result["percentage"] = 25
-        elif sub == 0x03:
-            result["mode"] = "auto"
-        elif sub == 0x01 and len(payload) > 1:
-            level = max(1, min(3, payload[1])) + 1
-            result["fan_speed"] = level
-            result["percentage"] = level * 25
-            result["mode"] = ("fan-only", "low", "medium", "high")[level - 1]
-        return
-    level = max(1, min(3, payload[0]))
-    result["fan_speed"] = level
-    result["percentage"] = (33, 66, 99)[level - 1]
-    result["mode"] = ("low", "medium", "high")[level - 1]
-
-
-def _decode_purifier_speed(profile: DeviceProfile, payload: bytes, result: dict[str, Any]) -> None:
-    """Decode the three different purifier speed report layouts."""
-    model = profile.model_name
-    if model in PURIFIER_3A_MODELS:
-        pair = (payload[0], payload[1] if len(payload) > 1 else 0)
-        for index, (mode, first, second) in enumerate(PURIFIER_3A_SPEEDS, start=1):
-            if pair == (first, second):
-                result["mode"] = mode
-                result["percentage"] = index * 20
-                return
-        return
-    if model in PURIFIER_H7120_MODELS:
-        # Reports put the gear in byte 3 or byte 4 depending on firmware.
-        gear = payload[1] if len(payload) > 1 and payload[1] else payload[0]
-        gear = max(1, min(4, gear))
-        result["fan_speed"] = gear
-        result["percentage"] = gear * 25
-        result["mode"] = ("sleep", "low", "medium", "high")[gear - 1]
-        return
-    if model in PURIFIER_H7126_MODELS:
-        level = payload[1] if payload[0] == 0x01 and len(payload) > 1 else payload[0]
-        level = max(1, min(3, level))
-        result["fan_speed"] = level
-        result["percentage"] = level * 33
-        result["mode"] = ("sleep", "low", "high")[level - 1]
-        return
-    result["fan_speed"] = payload[0]
-    result["percentage"] = _gear_percentage(profile, payload[0])
 
 
 def _gear_percentage(profile: DeviceProfile, gear: int) -> int:

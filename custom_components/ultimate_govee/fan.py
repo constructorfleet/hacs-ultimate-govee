@@ -129,7 +129,7 @@ class GoveeFan(GoveeEntity, FanEntity):
         if profile.kind == KIND_PURIFIER:
             command = commands.purifier_mode(profile, preset_mode)
         elif profile.kind == KIND_DEHUMIDIFIER:
-            command = commands.dehumidifier_mode(preset_mode)
+            command = commands.dehumidifier_mode(profile, preset_mode)
         else:
             command = commands.fan_mode(profile, preset_mode)
         await self._send(command, {"mode": preset_mode, "power": True})
@@ -143,7 +143,7 @@ class GoveeFan(GoveeEntity, FanEntity):
             {"oscillation": oscillating},
         )
 
-    def _power_command(self, on: bool, speed: int) -> commands.WireCommand:
+    def _power_command(self, on: bool, speed: int) -> commands.Command:
         profile = self.device.profile
         if profile.kind in {KIND_PURIFIER, KIND_DEHUMIDIFIER}:
             return commands.power(profile, on)

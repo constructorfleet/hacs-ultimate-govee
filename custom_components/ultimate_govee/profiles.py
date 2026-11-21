@@ -82,8 +82,11 @@ class DeviceProfile:
     ice_sizes: tuple[str, ...] = ()
     modes: tuple[str, ...] = ()
     # Evidence label for the registry rule that selected this profile. It is
-    # not a wire dialect or a taxonomy; see the note above PROFILE_REGISTRY.
+    # not a taxonomy; see the note above PROFILE_REGISTRY.
     family: str = "generic"
+    # Name of the family dialect that owns this SKU's register frames. The
+    # assignment comes from SKU_DIALECTS below, never from kind or prefix.
+    dialect: str = "generic"
 
     @property
     def supports_color(self) -> bool:
@@ -165,14 +168,6 @@ PURIFIER_MODELS = frozenset(
 PURIFIER_3A_MODELS = frozenset({"H7122", "H7123", "H7124"})
 PURIFIER_H7120_MODELS = frozenset({"H7120", "H7121"})
 PURIFIER_H7126_MODELS = frozenset({"H7126", "H7127", "H7128", "H7129", "H712C"})
-# Speed pairs for the 0x3A purifier family: (mode, first byte, second byte).
-PURIFIER_3A_SPEEDS: tuple[tuple[str, int, int], ...] = (
-    ("sleep", 0x05, 0x00),
-    ("low", 0x01, 0x01),
-    ("medium", 0x01, 0x02),
-    ("high", 0x01, 0x03),
-    ("auto", 0x03, 0x00),
-)
 DEHUMIDIFIER_MODELS = frozenset({"H7150", "H7151", "H7152"})
 DIFFUSER_MODELS = frozenset({"H7161", "H7162"})
 ICE_MAKER_MODELS = frozenset({"H7172", "H717D", "H8102", "H8120", "H8121", "H8122", "H8131"})
@@ -285,6 +280,69 @@ FAN_SPEEDS: dict[str, int] = {
 }
 
 
+# Per-SKU dialect assignment. One line per SKU, even when several SKUs point at
+# the same observed variant: sharing is an optimisation for SKUs the shipped
+# handler already treated as byte-identical, never an inference from kind or
+# prefix. ``H7141`` and ``H7142`` stay separate because H7142 adds UVC and the
+# night light. Names map to implementations in ``protocol/families``.
+SKU_DIALECTS: dict[str, str] = {
+    # Ceiling fans: exact SKUs despite the H1/R1 light-looking prefixes.
+    "H1310": "ceiling_fan",
+    "H1370": "ceiling_fan",
+    "R1310": "ceiling_fan",
+    # Tower fans; H7105/H7107 are the shipped auto-mode-0x02 variant.
+    "H7100": "fan",
+    "H7101": "fan",
+    "H7102": "fan",
+    "H7103": "fan",
+    "H7105": "fan_h7105",
+    "H7106": "fan",
+    "H7107": "fan_h7105",
+    "H7111": "fan",
+    "H7112": "fan",
+    # Heater1 (plain 0x33 handler).
+    "H7130": "heater1",
+    "H7137": "heater1",
+    "H713A": "heater1",
+    "H713C": "heater1",
+    "H713E": "heater1",
+    # Heater2 (0x3A sub-commands and multiSync).
+    "H7131": "heater2",
+    "H7132": "heater2",
+    "H7133": "heater2",
+    "H7134": "heater2",
+    "H7135": "heater2",
+    "H713B": "heater2",
+    # Humidifiers: the first concrete pair, kept as individual entries.
+    "H7141": "humidifier_h7141",
+    "H7142": "humidifier_h7142",
+    # Dehumidifiers: the shipped handler did not separate these three.
+    "H7150": "dehumidifier",
+    "H7151": "dehumidifier",
+    "H7152": "dehumidifier",
+    # Purifier speed layouts; each line stays explicit even where the shipped
+    # handler grouped SKUs into one observed variant.
+    "H7120": "purifier_h7120",
+    "H7121": "purifier_h7120",
+    "H7122": "purifier_3a",
+    "H7123": "purifier_3a",
+    "H7124": "purifier_3a",
+    "H7126": "purifier_h7126",
+    "H7127": "purifier_h7126",
+    "H7128": "purifier_h7126",
+    "H7129": "purifier_h7126",
+    "H712C": "purifier_h7126",
+    # Ice makers: power register and ice-size direction differ by SKU.
+    "H7172": "ice_maker",
+    "H717D": "ice_maker",
+    "H8102": "ice_maker",
+    "H8131": "ice_maker",
+    "H8120": "ice_maker_h8120",
+    "H8121": "ice_maker_ascending",
+    "H8122": "ice_maker_ascending",
+}
+
+
 # Profile family names are evidence labels for selection bookkeeping, not a
 # taxonomy. A name records why a SKU matched (an explicit model list, a
 # captured handler, or a prefix observed on this profile surface); two SKUs of
@@ -319,10 +377,11 @@ class ProfileSpec:
         support_cmds: list[str] | None = None,
         properties: dict[str, Any] | None = None,
     ) -> DeviceProfile:
-        """Build this rule's profile and stamp it with the family name."""
+        """Build this rule's profile and stamp it with the family and dialect."""
         return replace(
             self.factory(sku, support_cmds, properties),
             family=self.name,
+            dialect=SKU_DIALECTS.get(sku, "generic"),
         )
 
 

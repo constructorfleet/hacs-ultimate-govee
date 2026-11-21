@@ -22,12 +22,26 @@ from .api.iot import GoveeIot
 from .api.lan import GoveeLan
 from .models import GoveeDevice
 from .profiles import DeviceProfile
-from .protocol.codec import build_frame, bytes_to_base64, frames_from_command
-from .protocol.commands import WireCommand
+from .protocol.codec import build_frame, bytes_to_base64
+from .protocol.command import (
+    ACTION_BRIGHTNESS,
+    ACTION_CLOUD,
+    ACTION_COLOR,
+    ACTION_FRAMES,
+    ACTION_POWER,
+    STRATEGY_PT_REAL,
+    Command,
+)
 
 _LOGGER = logging.getLogger(__name__)
 FRAME_LENGTH = 20
 BLE_STATUS_PREFIXES = frozenset({0xAA, 0xEE})
+GANG_VALUES = ((17, 16), (34, 32), (68, 64))
+CLOUD_ACTIONS = frozenset(
+    {ACTION_POWER, ACTION_BRIGHTNESS, ACTION_COLOR, ACTION_FRAMES, ACTION_CLOUD}
+)
+LAN_ACTIONS = frozenset({ACTION_POWER, ACTION_BRIGHTNESS, ACTION_COLOR})
+BLE_ACTIONS = frozenset({ACTION_POWER, ACTION_BRIGHTNESS, ACTION_FRAMES})
 
 
 class TransportKind(StrEnum):
@@ -91,8 +105,12 @@ class Transport(ABC):
         """Whether this adapter can request status for ``device``."""
         return self.supports(device)
 
+    def supports_command(self, command: Command) -> bool:
+        """Whether this adapter can encode ``command`` for its own path."""
+        return True
+
     @abstractmethod
-    async def send(self, device: GoveeDevice, command: WireCommand) -> None:
+    async def send(self, device: GoveeDevice, command: Command) -> None:
         """Send ``command`` or raise :class:`TransportNotSent`."""
 
     @abstractmethod
@@ -120,7 +138,10 @@ class UnsupportedTransport(Transport):
     def supports(self, device: GoveeDevice) -> bool:
         return False
 
-    async def send(self, device: GoveeDevice, command: WireCommand) -> None:
+    def supports_command(self, command: Command) -> bool:
+        return False
+
+    async def send(self, device: GoveeDevice, command: Command) -> None:
         raise TransportUnavailable(f"{self.kind.value} is not implemented")
 
     async def request_status(self, device: GoveeDevice) -> None:
@@ -207,7 +228,10 @@ class BleGattTransport(Transport):
             except Exception as err:
                 _LOGGER.debug("BLE shutdown failed: %s", err)
 
-    async def send(self, device: GoveeDevice, command: WireCommand) -> None:
+    def supports_command(self, command: Command) -> bool:
+        return command.action in BLE_ACTIONS
+
+    async def send(self, device: GoveeDevice, command: Command) -> None:
         if not self.supports(device):
             raise TransportUnavailable(f"{device.name} has no BLE GATT path")
         frames = _ble_frames(command, device.profile)
@@ -323,41 +347,34 @@ def _default_ble_manager(
     return GoveeBle(hass, address, name, on_notification)
 
 
-def _ble_frames(command: WireCommand, profile: DeviceProfile) -> list[bytes]:
-    """Encode a wire command as documented BLE frames or refuse it."""
-    if command.cmd in {"ptReal", "multiSync"}:
-        frames = frames_from_command((command.data or {}).get("command"))
+def _ble_frames(command: Command, profile: DeviceProfile) -> list[bytes]:
+    """Encode a command intent as documented BLE frames or refuse it."""
+    parameters = command.parameters
+
+    if command.action == ACTION_POWER:
+        # Wire power values are profile-specific (some switches use 17/16);
+        # the BLE frame is always a plain 1/0, including per-gang power.
+        return [build_frame(0x01, [1 if parameters["on"] else 0])]
+
+    if command.action == ACTION_BRIGHTNESS:
+        percent = max(0, min(100, int(parameters["percent"])))
+        # Legacy 254-scale models map 0..100 onto 20..254 over BLE.
+        ble_value = 20 + round(percent * 234 / 100) if profile.brightness_max == 254 else percent
+        return [build_frame(0x04, [ble_value])]
+
+    if command.action == ACTION_FRAMES:
+        frames = list(parameters.get("frames") or ())
         if not frames:
             raise TransportUnavailable("The command has no BLE frames")
+        strategy = parameters.get("strategy", STRATEGY_PT_REAL)
         for frame in frames:
             if len(frame) != FRAME_LENGTH or _checksum(frame[: FRAME_LENGTH - 1]) != frame[-1]:
                 raise TransportUnavailable(
-                    f"The {command.cmd} payload is not a valid 20-byte BLE frame"
+                    f"The {strategy} payload is not a valid 20-byte BLE frame"
                 )
         return frames
 
-    if command.cmd == "turn":
-        value = _byte_value((command.data or {}).get("val"))
-        if value is not None:
-            # Wire power values are profile-specific (some switches use 17/16);
-            # the BLE frame uses a plain 1/0.
-            return [build_frame(0x01, [1 if value == profile.power_on else 0])]
-        raise TransportUnavailable("The turn command has no BLE value")
-
-    if command.cmd == "brightness":
-        value = _byte_value((command.data or {}).get("val"))
-        if value is not None:
-            percent = round(value * 100 / max(1, profile.brightness_max))
-            percent = max(0, min(100, percent))
-            if profile.brightness_max == 254:
-                # Legacy 254-scale models map 0..100 onto 20..254 over BLE.
-                ble_value = 20 + round(percent * 234 / 100)
-            else:
-                ble_value = percent
-            return [build_frame(0x04, [ble_value])]
-        raise TransportUnavailable("The brightness command has no BLE value")
-
-    if command.cmd == "colorwc":
+    if command.action == ACTION_COLOR:
         # The RGB/colour-temperature layout differs by family (0x05/0x02,
         # 0x05/0x0D, 0x05/0x15 and per-SKU variants), and nothing in the
         # device profile selects one. Fall back instead of sending wrong bytes.
@@ -365,18 +382,7 @@ def _ble_frames(command: WireCommand, profile: DeviceProfile) -> list[bytes]:
             "BLE colour frames are family-specific; use LAN or cloud for colorwc"
         )
 
-    raise TransportUnavailable(f"{command.cmd} has no BLE GATT encoding")
-
-
-def _byte_value(value: Any) -> int | None:
-    """Coerce an int-like payload byte, rejecting values outside one byte."""
-    if isinstance(value, bool):
-        return int(value)
-    try:
-        number = int(value)
-    except TypeError, ValueError:
-        return None
-    return number if 0 <= number <= 0xFF else None
+    raise TransportUnavailable(f"{command.action} has no BLE GATT encoding")
 
 
 def _checksum(data: bytes) -> int:
@@ -384,6 +390,71 @@ def _checksum(data: bytes) -> int:
     for value in data:
         checksum ^= value
     return checksum
+
+
+def _clamp_percent(value: Any) -> int:
+    return max(0, min(100, int(value)))
+
+
+def _gang_values(channel: int) -> tuple[int, int]:
+    index = max(0, min(len(GANG_VALUES) - 1, channel))
+    return GANG_VALUES[index]
+
+
+def _color_fields(parameters: dict[str, Any]) -> dict[str, Any]:
+    red, green, blue = parameters["rgb"]
+    return {
+        "color": {"r": red, "g": green, "b": blue},
+        "colorTemInKelvin": int(parameters.get("kelvin", 0)),
+    }
+
+
+def _frame_fields(parameters: dict[str, Any]) -> dict[str, Any]:
+    return {"command": [bytes_to_base64(frame) for frame in parameters["frames"]]}
+
+
+def _cloud_wire(command: Command, profile: DeviceProfile) -> tuple[str, dict[str, Any]]:
+    """Encode a command intent for the AWS IoT command envelope."""
+    parameters = command.parameters
+    if command.action == ACTION_POWER:
+        channel = parameters.get("channel")
+        if channel is not None:
+            on_value, off_value = _gang_values(int(channel))
+            value = on_value if parameters["on"] else off_value
+        else:
+            value = profile.power_on if parameters["on"] else profile.power_off
+        return "turn", {"val": value}
+    if command.action == ACTION_BRIGHTNESS:
+        percent = _clamp_percent(parameters["percent"])
+        return "brightness", {"val": round(percent * profile.brightness_max / 100)}
+    if command.action == ACTION_COLOR:
+        return "colorwc", _color_fields(parameters)
+    if command.action == ACTION_FRAMES:
+        strategy = parameters.get("strategy", STRATEGY_PT_REAL)
+        return strategy, _frame_fields(parameters)
+    if command.action == ACTION_CLOUD:
+        return str(parameters["command"]), dict(parameters.get("data") or {})
+    raise TransportUnavailable(f"{command.action} has no cloud encoding")
+
+
+def _lan_wire(command: Command) -> tuple[str, dict[str, Any]] | None:
+    """Encode a command intent for the LAN UDP envelope, or decline it."""
+    parameters = command.parameters
+    if command.action == ACTION_POWER:
+        channel = parameters.get("channel")
+        if channel is not None:
+            on_value, off_value = _gang_values(int(channel))
+            value = on_value if parameters["on"] else off_value
+        else:
+            value = 1 if parameters["on"] else 0
+        return "turn", {"value": value}
+    if command.action == ACTION_BRIGHTNESS:
+        return "brightness", {"value": _clamp_percent(parameters["percent"])}
+    if command.action == ACTION_COLOR:
+        return "colorwc", _color_fields(parameters)
+    if command.action == ACTION_FRAMES and parameters.get("lan", True):
+        return STRATEGY_PT_REAL, _frame_fields(parameters)
+    return None
 
 
 class CloudMqttTransport(Transport):
@@ -420,13 +491,16 @@ class CloudMqttTransport(Transport):
     def supports_status(self, device: GoveeDevice) -> bool:
         return self.supports(device) and device.state.online
 
-    async def send(self, device: GoveeDevice, command: WireCommand) -> None:
+    def supports_command(self, command: Command) -> bool:
+        return command.action in CLOUD_ACTIONS
+
+    async def send(self, device: GoveeDevice, command: Command) -> None:
         client = self._iot()
         if not self.enabled or client is None or not client.connected:
             raise TransportUnavailable("The Govee IoT connection is not available")
         if not device.iot_topic:
             raise TransportUnavailable(f"{device.name} has no cloud topic")
-        cmd, data = command.aws_payload()
+        cmd, data = _cloud_wire(command, device.profile)
         try:
             client.send_command(
                 device.iot_topic,
@@ -491,11 +565,18 @@ class LanUdpTransport(Transport):
     def supports(self, device: GoveeDevice) -> bool:
         return self.enabled and bool(device.lan_ip) and self._lan() is not None
 
-    async def send(self, device: GoveeDevice, command: WireCommand) -> None:
+    def supports_command(self, command: Command) -> bool:
+        if command.action in LAN_ACTIONS:
+            return True
+        if command.action == ACTION_FRAMES:
+            return bool(command.parameters.get("lan", True))
+        return False
+
+    async def send(self, device: GoveeDevice, command: Command) -> None:
         client = self._lan()
         if not self.enabled or client is None:
             raise TransportUnavailable("The LAN transport is not started")
-        payload = command.lan_payload()
+        payload = _lan_wire(command)
         if payload is None:
             raise TransportUnavailable("The command has no LAN payload")
         if not device.lan_ip:
@@ -580,12 +661,15 @@ class CommandRouter:
             if kind not in self._ORDER and kind is not TransportKind.BLE_BROADCAST:
                 yield transport
 
-    async def send(self, device: GoveeDevice, command: WireCommand) -> TransportKind:
-        """Send ``command`` and return the transport that accepted it."""
+    async def send(self, device: GoveeDevice, command: Command) -> TransportKind:
+        """Send ``command`` and return the transport that accepted it.
+
+        Selection uses device reachability and each adapter's own command
+        support. Fallback happens only when an adapter that claimed the command
+        reports it was not sent.
+        """
         for transport in self._ordered():
-            if not transport.supports(device):
-                continue
-            if transport.kind is TransportKind.LAN_UDP and command.lan_payload() is None:
+            if not transport.supports(device) or not transport.supports_command(command):
                 continue
             try:
                 await transport.send(device, command)

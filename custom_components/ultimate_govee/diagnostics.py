@@ -66,6 +66,7 @@ async def async_get_config_entry_diagnostics(
                         "kind": device.profile.kind,
                         "features": sorted(device.profile.features),
                         "model_name": device.profile.model_name,
+                        "dialect": device.profile.dialect,
                     },
                     "lan_ip": device.lan_ip,
                     "ble_address": device.ble_address,

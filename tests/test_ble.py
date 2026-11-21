@@ -16,7 +16,13 @@ from custom_components.ultimate_govee.api.cloud import GoveeApiError
 from custom_components.ultimate_govee.models import DeviceState, GoveeDevice
 from custom_components.ultimate_govee.profiles import profile_for
 from custom_components.ultimate_govee.protocol.codec import build_frame, bytes_to_base64
-from custom_components.ultimate_govee.protocol.commands import WireCommand
+from custom_components.ultimate_govee.protocol.command import (
+    Command,
+    brightness_command,
+    color_command,
+    frames_command,
+    power_command,
+)
 from custom_components.ultimate_govee.protocol.state import decode_message
 from custom_components.ultimate_govee.transport import (
     BleBroadcastTransport,
@@ -123,7 +129,7 @@ async def test_turn_frame_has_documented_opcode_and_bcc() -> None:
     managers: list[FakeManager] = []
     transport = BleGattTransport(available=True, manager_factory=manager_factory(managers))
 
-    await transport.send(device(), WireCommand("turn", {"val": 1}))
+    await transport.send(device(), power_command(on=True))
 
     frame = managers[0].frames[0][0]
     assert frame[:3] == bytes([0x33, 0x01, 0x01])
@@ -135,7 +141,7 @@ async def test_brightness_frame_uses_register_04() -> None:
     managers: list[FakeManager] = []
     transport = BleGattTransport(available=True, manager_factory=manager_factory(managers))
 
-    await transport.send(device(), WireCommand("brightness", {"val": 50}))
+    await transport.send(device(), brightness_command(50))
 
     frame = managers[0].frames[0][0]
     assert frame[:3] == bytes([0x33, 0x04, 0x32])
@@ -147,7 +153,7 @@ async def test_legacy_254_brightness_scales_to_20_254() -> None:
     transport = BleGattTransport(available=True, manager_factory=manager_factory(managers))
     target = device(sku="H6002", profile=profile_for("H6002"))
 
-    await transport.send(target, WireCommand("brightness", {"val": 127}))
+    await transport.send(target, brightness_command(50))
 
     frame = managers[0].frames[0][0]
     assert frame[:3] == bytes([0x33, 0x04, 0x89])
@@ -159,7 +165,7 @@ async def test_turn_normalizes_profile_power_values() -> None:
     transport = BleGattTransport(available=True, manager_factory=manager_factory(managers))
     target = device(sku="H5080", profile=profile_for("H5080"))
 
-    await transport.send(target, WireCommand("turn", {"val": 17}))
+    await transport.send(target, power_command(on=True))
 
     frame = managers[0].frames[0][0]
     assert frame[:3] == bytes([0x33, 0x01, 0x01])
@@ -175,10 +181,7 @@ async def test_pt_real_and_multi_sync_send_decoded_frames(command_name: str) -> 
 
     await transport.send(
         device(),
-        WireCommand(
-            command_name,
-            {"command": [bytes_to_base64(first), bytes_to_base64(second)]},
-        ),
+        frames_command([first, second], strategy=command_name),
     )
 
     assert managers[0].frames == [[first, second]]
@@ -191,7 +194,7 @@ async def test_pt_real_rejects_a_bad_frame_instead_of_sending_it() -> None:
     frame[-1] ^= 0xFF
 
     with pytest.raises(TransportUnavailable, match="not a valid 20-byte BLE frame"):
-        await transport.send(device(), WireCommand("ptReal", {"command": [bytes(frame).hex()]}))
+        await transport.send(device(), frames_command(bytes(frame), strategy="ptReal"))
 
     assert managers == []
 
@@ -203,10 +206,7 @@ async def test_colorwc_falls_back_because_the_frame_is_family_specific() -> None
     with pytest.raises(TransportUnavailable, match="family-specific"):
         await transport.send(
             device(),
-            WireCommand(
-                "colorwc",
-                {"color": {"r": 255, "g": 0, "b": 0}, "colorTemInKelvin": 0},
-            ),
+            color_command(rgb=(255, 0, 0)),
         )
 
     assert managers == []
@@ -217,7 +217,7 @@ async def test_unknown_cloud_command_is_refused() -> None:
     transport = BleGattTransport(available=True, manager_factory=manager_factory(managers))
 
     with pytest.raises(TransportUnavailable, match="no BLE GATT encoding"):
-        await transport.send(device(), WireCommand("timer", {"val": 1}))
+        await transport.send(device(), Command("toggle", {}))
 
 
 async def test_router_prefers_ble_over_cloud() -> None:
@@ -230,7 +230,7 @@ async def test_router_prefers_ble_over_cloud() -> None:
         )
     )
 
-    used = await router.send(device(), WireCommand("turn", {"val": 1}))
+    used = await router.send(device(), power_command(on=True))
 
     assert used is TransportKind.BLE_GATT
     assert len(managers[0].frames) == 1
@@ -251,7 +251,7 @@ async def test_router_falls_back_when_ble_write_fails(caplog: Any) -> None:
         )
     )
 
-    used = await router.send(device(), WireCommand("turn", {"val": 1}))
+    used = await router.send(device(), power_command(on=True))
 
     assert used is TransportKind.CLOUD_MQTT
     assert iot.sent == [("topic/device-1", "turn", {"val": 1}, 0, 1)]
@@ -270,7 +270,7 @@ async def test_router_falls_back_when_ble_has_no_address() -> None:
     )
     target = device(ble_address=None)
 
-    used = await router.send(target, WireCommand("turn", {"val": 1}))
+    used = await router.send(target, power_command(on=True))
 
     assert used is TransportKind.CLOUD_MQTT
     assert managers == []
@@ -283,7 +283,7 @@ async def test_transport_without_ha_bluetooth_stays_unsupported() -> None:
     assert transport.supported is False
     assert transport.supports(target) is False
     with pytest.raises(TransportUnavailable):
-        await transport.send(target, WireCommand("turn", {"val": 1}))
+        await transport.send(target, power_command(on=True))
     assert transport.status()["enabled"] is False
 
 
@@ -304,7 +304,7 @@ async def test_notification_becomes_a_decodable_status_report() -> None:
         on_report=reports.append,
     )
     target = device()
-    await transport.send(target, WireCommand("turn", {"val": 1}))
+    await transport.send(target, power_command(on=True))
 
     frame = build_frame(0x01, [1], opcode=0xAA)
     managers[0].callback(frame)
@@ -325,7 +325,7 @@ async def test_write_acknowledgements_do_not_become_device_state() -> None:
         manager_factory=manager_factory(managers),
         on_report=reports.append,
     )
-    await transport.send(device(), WireCommand("turn", {"val": 1}))
+    await transport.send(device(), power_command(on=True))
 
     managers[0].callback(build_frame(0x01, [0]))
 
@@ -348,7 +348,7 @@ async def test_status_reports_started_and_connected() -> None:
     assert transport.status()["started"] is False
 
     await transport.async_start()
-    await transport.send(device(), WireCommand("turn", {"val": 1}))
+    await transport.send(device(), power_command(on=True))
 
     status = transport.status()
     assert status["supported"] is True
@@ -363,8 +363,8 @@ async def test_status_reports_started_and_connected() -> None:
 async def test_async_stop_closes_every_manager() -> None:
     managers: list[FakeManager] = []
     transport = BleGattTransport(available=True, manager_factory=manager_factory(managers))
-    await transport.send(device(), WireCommand("turn", {"val": 1}))
-    await transport.send(device(device_id="device-2"), WireCommand("turn", {"val": 0}))
+    await transport.send(device(), power_command(on=True))
+    await transport.send(device(device_id="device-2"), power_command(on=False))
 
     await transport.async_stop()
 
@@ -508,7 +508,7 @@ async def test_router_raises_only_when_no_transport_accepts() -> None:
     router = CommandRouter((BleGattTransport(available=True),))
 
     with pytest.raises(GoveeApiError, match="No transport"):
-        await router.send(device(ble_address=None), WireCommand("turn", {"val": 1}))
+        await router.send(device(ble_address=None), power_command(on=True))
 
 
 async def test_transport_not_sent_is_what_the_router_sees() -> None:
@@ -519,4 +519,4 @@ async def test_transport_not_sent_is_what_the_router_sees() -> None:
     )
 
     with pytest.raises(TransportNotSent):
-        await transport.send(device(), WireCommand("turn", {"val": 1}))
+        await transport.send(device(), power_command(on=True))

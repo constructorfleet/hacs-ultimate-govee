@@ -89,7 +89,7 @@ class GoveeHumidifier(GoveeEntity, HumidifierEntity):
         if FEATURE_TARGET_HUMIDITY not in self.device.profile.features:
             return
         await self._send(
-            commands.humidifier_target(humidity),
+            commands.humidifier_target(self.device.profile, humidity),
             {"target_humidity": humidity, "mode": "auto"},
         )
 
@@ -99,13 +99,18 @@ class GoveeHumidifier(GoveeEntity, HumidifierEntity):
             return
         if mode == "auto":
             await self._send(
-                commands.humidifier_target(self.device.state.target_humidity or 50),
+                commands.humidifier_target(
+                    self.device.profile, self.device.state.target_humidity or 50
+                ),
                 {"mode": "auto", "power": True},
             )
             return
         if mode == "manual":
             level = self.device.state.fan_speed or 5
-            await self._send(commands.mist_level(level), {"mode": "manual", "power": True})
+            await self._send(
+                commands.mist_level(self.device.profile, level),
+                {"mode": "manual", "power": True},
+            )
             return
         await self._send(
             commands.humidifier_mode(self.device.profile, mode),
