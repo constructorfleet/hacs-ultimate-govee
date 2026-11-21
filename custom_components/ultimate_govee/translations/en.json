@@ -1,0 +1,74 @@
+{
+  "config": {
+    "step": {
+      "user": {
+        "title": "Govee account",
+        "description": "Sign in with the account used by the Govee Home app.",
+        "data": {
+          "email": "Email",
+          "password": "Password"
+        }
+      },
+      "reauth_confirm": {
+        "title": "Reauthenticate Govee",
+        "description": "The stored session for {email} is no longer valid. Enter the password to continue.",
+        "data": {
+          "password": "Password"
+        }
+      }
+    },
+    "error": {
+      "invalid_auth": "Govee rejected the email or password.",
+      "cannot_connect": "Could not reach Govee.",
+      "unknown": "Unexpected error."
+    },
+    "abort": {
+      "reauth_successful": "Reauthentication succeeded.",
+      "wrong_account": "These credentials belong to a different Govee account.",
+      "reauth_failed": "The config entry being reauthenticated no longer exists."
+    }
+  },
+  "options": {
+    "step": {
+      "init": {
+        "title": "Ultimate Govee options",
+        "data": {
+          "enable_lan": "Use local network control",
+          "enable_iot": "Use cloud (AWS IoT) control",
+          "poll_interval": "Cloud poll interval",
+          "lan_scan_interval": "LAN discovery interval"
+        }
+      }
+    }
+  },
+  "entity": {
+    "sensor": {
+      "filter_life": {
+        "name": "Filter life"
+      },
+      "air_quality": {
+        "name": "Air quality",
+        "state": {
+          "excellent": "Excellent",
+          "good": "Good",
+          "moderate": "Moderate",
+          "poor": "Poor"
+        }
+      }
+    },
+    "binary_sensor": {
+      "leak": {
+        "name": "Leak"
+      },
+      "contact": {
+        "name": "Contact"
+      },
+      "water_shortage": {
+        "name": "Water tank empty"
+      },
+      "basket_full": {
+        "name": "Ice basket full"
+      }
+    }
+  }
+}
